@@ -149,5 +149,3 @@ time.sleep(5)
 # 3. Start LocalTunnel
 # -------------------------------
 print("Starting tunnel...")
-
-!npx localtunnel --port 8501
