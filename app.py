@@ -3,9 +3,6 @@
 # Uses LocalTunnel (no account needed)
 # ================================
 
-!pip -q install streamlit folium pandas numpy scikit-learn requests streamlit-folium
-!npm install -g localtunnel
-
 import os
 import time
 import threading
