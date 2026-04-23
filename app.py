@@ -15,10 +15,10 @@ st.set_page_config(page_title="OSINT Dashboard", layout="wide")
 LAT = 38.85
 LNG = -77.30
 
-st.title("🗺️ OSINT Hotspot Dashboard (Stable Version)")
+st.title("🗺️ OSINT Hotspot Dashboard (Stable Fixed)")
 
 # ================================
-# 1. DATA (cached - prevents flicker)
+# 1. DATA (cached)
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
@@ -51,21 +51,16 @@ def fetch_data():
             "name": tags.get("name", "unknown"),
             "lat": el.get("lat"),
             "lng": el.get("lon"),
-            "type": (
-                tags.get("amenity")
-                or tags.get("tourism")
-                or tags.get("shop")
-                or "unknown"
-            )
+            "type": tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown"
         })
 
     return pd.DataFrame(rows)
 
 df_raw = fetch_data()
 
-# fallback if API fails
+# fallback
 if df_raw.empty:
-    st.warning("Using fallback dataset (API unavailable)")
+    st.warning("Using fallback dataset")
     df_raw = pd.DataFrame({
         "name": [f"synthetic_{i}" for i in range(40)],
         "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
@@ -91,58 +86,65 @@ def process(df):
     df = df.copy()
     df["risk"] = df["type"].apply(score)
 
-    if len(df) > 0:
-        coords = df[["lat", "lng"]].to_numpy()
+    coords = df[["lat","lng"]].to_numpy()
 
-        db = DBSCAN(
-            eps=0.6 / 6371,
-            min_samples=2,
-            metric="haversine"
-        ).fit(np.radians(coords))
+    db = DBSCAN(
+        eps=0.6/6371,
+        min_samples=2,
+        metric="haversine"
+    ).fit(np.radians(coords))
 
-        df["cluster"] = db.labels_
+    df["cluster"] = db.labels_
 
     return df
 
 df = process(df_raw)
 
 # ================================
-# 3. FILTER UI (does NOT trigger recompute)
+# 3. UI (IMPORTANT FIX: freeze inputs FIRST)
 # ================================
 st.sidebar.header("Filters")
 
-types = df["type"].unique().tolist()
-selected = st.sidebar.multiselect("Types", types, default=types)
-min_risk = st.sidebar.slider("Minimum Risk", 0.0, 5.0, 0.0)
+types = sorted(df["type"].unique())
 
-filtered = df[(df["type"].isin(selected)) & (df["risk"] >= min_risk)]
+selected_types = st.sidebar.multiselect(
+    "Types",
+    options=types,
+    default=types
+)
+
+min_risk = st.sidebar.slider(
+    "Minimum Risk",
+    0.0,
+    5.0,
+    0.0
+)
+
+# ================================
+# 4. FILTERED DATA (AFTER UI STABILIZES)
+# ================================
+filtered = df[
+    (df["type"].isin(selected_types)) &
+    (df["risk"] >= min_risk)
+].copy()
 
 st.write("Points:", len(filtered))
 
 # ================================
-# 4. MAP (cached to prevent flicker)
+# 5. MAP (NO CACHE — IMPORTANT FIX)
 # ================================
-@st.cache_data
-def build_map(df):
-    m = folium.Map(location=[LAT, LNG], zoom_start=11)
+m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
-    if len(df) > 0:
-        heat = [[r.lat, r.lng, r.risk] for r in df.itertuples()]
-        HeatMap(heat, radius=18).add_to(m)
+if len(filtered) > 0:
+    heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
+    HeatMap(heat, radius=18).add_to(m)
 
-        for r in df.itertuples():
-            folium.CircleMarker(
-                location=[r.lat, r.lng],
-                radius=4,
-                popup=f"{r.name} | {r.type} | {r.risk}",
-                fill=True
-            ).add_to(m)
+    for r in filtered.itertuples():
+        folium.CircleMarker(
+            location=[r.lat, r.lng],
+            radius=4,
+            popup=f"{r.name} | {r.type} | {r.risk}",
+            fill=True
+        ).add_to(m)
 
-    return m
-
-m = build_map(filtered)
-
-# ================================
-# 5. RENDER
-# ================================
 st_folium(m, width=1200, height=700)
