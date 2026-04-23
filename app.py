@@ -148,3 +148,4 @@ if len(filtered) > 0:
         ).add_to(m)
 
 st_folium(m, width=1200, height=700)
+st.pydeck_chart(deck, use_container_width=True, key="heatmap")
