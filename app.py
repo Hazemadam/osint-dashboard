@@ -131,7 +131,7 @@ filtered = df[
 st.write("Points:", len(filtered))
 
 # ================================
-# 5. MAP (NO CACHE — IMPORTANT FIX)
+# 5. MAP (FIXED STABLE VERSION)
 # ================================
 m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
@@ -147,5 +147,9 @@ if len(filtered) > 0:
             fill=True
         ).add_to(m)
 
-st_folium(m, width=1200, height=700)
-st.pydeck_chart(deck, use_container_width=True, key="heatmap")
+st_folium(
+    m,
+    width=1200,
+    height=700,
+    key="osint_map"
+)
