@@ -1,7 +1,7 @@
 streamlit
+folium
 pandas
 numpy
-folium
-streamlit-folium
 scikit-learn
 requests
+streamlit-folium
