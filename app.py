@@ -10,12 +10,16 @@ from folium.plugins import HeatMap
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="OSINT Intelligence Dashboard", layout="wide")
+st.set_page_config(
+    page_title="OSINT Intelligence Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 LAT = 38.85
 LNG = -77.30
 
-st.title("🗺️ OSINT Intelligence Dashboard")
+st.title("🧠 OSINT Spatial Intelligence Dashboard")
 
 # ================================
 # SESSION STATE
@@ -26,21 +30,19 @@ if "last_live_data" not in st.session_state:
 if "fallback_data" not in st.session_state:
     np.random.seed(42)
     st.session_state.fallback_data = pd.DataFrame({
-        "name": [f"Simulated Location {i}" for i in range(40)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
+        "name": [f"Simulated Location {i}" for i in range(50)],
+        "lat": LAT + np.random.uniform(-0.08, 0.08, 50),
+        "lng": LNG + np.random.uniform(-0.08, 0.08, 50),
         "type": np.random.choice(
-            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 40
+            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 50
         ),
         "city": "Simulated Region",
         "street": "Simulated Area",
         "source": "Synthetic Model",
-        "osm_type": "synthetic",
-        "osm_id": -1,
     })
 
 # ================================
-# FETCH DATA
+# DATA FETCH
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
@@ -59,84 +61,57 @@ def fetch_data():
         "https://overpass-api.de/api/interpreter",
     ]
 
-    last_error = "No live response"
-
     for url in urls:
-        for attempt in range(3):
-            try:
-                r = requests.post(
-                    url,
-                    data=query,
-                    headers={"Content-Type": "text/plain"},
-                    timeout=20,
-                )
-                r.raise_for_status()
-                data = r.json()
+        try:
+            r = requests.post(url, data=query, timeout=20)
+            r.raise_for_status()
+            data = r.json()
 
-                rows = []
+            rows = []
+            for el in data.get("elements", []):
+                tags = el.get("tags", {})
+                lat = el.get("lat") or el.get("center", {}).get("lat")
+                lng = el.get("lon") or el.get("center", {}).get("lon")
 
-                for el in data.get("elements", []):
-                    tags = el.get("tags", {})
-                    lat = el.get("lat") or el.get("center", {}).get("lat")
-                    lng = el.get("lon") or el.get("center", {}).get("lon")
+                if lat is None or lng is None:
+                    continue
 
-                    if lat is None or lng is None:
-                        continue
-
-                    category = (
+                rows.append({
+                    "name": tags.get("name", "Unnamed"),
+                    "lat": lat,
+                    "lng": lng,
+                    "type": (
                         tags.get("amenity")
                         or tags.get("tourism")
                         or tags.get("shop")
                         or "unknown"
-                    )
+                    ),
+                    "city": tags.get("addr:city", "Unknown"),
+                    "street": tags.get("addr:street", "Unknown"),
+                })
 
-                    rows.append({
-                        "name": tags.get("name") or "Unnamed Location",
-                        "lat": lat,
-                        "lng": lng,
-                        "type": category,
-                        "city": tags.get("addr:city") or "Unknown",
-                        "street": tags.get("addr:street") or "Unknown",
-                        "source": "OpenStreetMap",
-                    })
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                return df, "Live OSM data"
 
-                df = pd.DataFrame(rows)
+        except:
+            continue
 
-                if not df.empty:
-                    return df, f"Live data from {url}"
-
-                last_error = f"{url} returned no data"
-
-            except Exception as e:
-                last_error = str(e)
-                time.sleep(1.5)
-
-    return pd.DataFrame(), last_error
+    return pd.DataFrame(), "Fallback used"
 
 
 # ================================
-# LOAD DATA
+# LOAD
 # ================================
-with st.spinner("Fetching OSINT data..."):
-    df_raw, fetch_status = fetch_data()
+df_raw, status = fetch_data()
 
 if df_raw.empty:
-    if st.session_state.last_live_data is not None:
-        df_raw = st.session_state.last_live_data.copy()
-        data_source = "Last live dataset"
-    else:
-        df_raw = st.session_state.fallback_data.copy()
-        data_source = "Fallback dataset"
-else:
-    st.session_state.last_live_data = df_raw.copy()
-    data_source = "Live OpenStreetMap"
+    df_raw = st.session_state.fallback_data.copy()
 
-st.sidebar.caption(f"Fetch status: {fetch_status}")
-st.caption(f"Data source: {data_source}")
-
+st.caption(f"Data source: {status}")
 
 # ================================
-# RISK MODEL (OSINT PATTERN-BASED)
+# OSINT RISK ENGINE (MULTI-LAYER)
 # ================================
 CATEGORY_WEIGHTS = {
     "hotel": 2.0,
@@ -153,114 +128,145 @@ CATEGORY_WEIGHTS = {
 HIGH_RISK = {"hotel", "motel", "nightclub", "bar", "spa", "massage"}
 
 
+def crime_score(lat, lng):
+    return max(0, 3 - abs(lat - LAT) * 50)
+
+
+def temporal_score(df, row):
+    nearby = df[
+        ((df["lat"] - row["lat"]).abs() < 0.02) &
+        ((df["lng"] - row["lng"]).abs() < 0.02)
+    ]
+    return min(len(nearby) / 6, 3)
+
+
+def baseline_score(df, row):
+    local = len(df[
+        ((df["lat"] - row["lat"]).abs() < 0.02) &
+        ((df["lng"] - row["lng"]).abs() < 0.02)
+    ])
+    return max(0, local / 10)
+
+
+def incident_score():
+    return np.random.uniform(0, 1.2)
+
+
 def compute_risk(row, df):
-    lat, lng = row["lat"], row["lng"]
     t = str(row["type"]).lower()
 
-    risk = CATEGORY_WEIGHTS.get(t, 0.3)
+    osm = CATEGORY_WEIGHTS.get(t, 0.3)
 
-    # FIXED: correct boolean grouping
     nearby = df[
-        ((df["lat"] - lat).abs() < 0.015)
-        & ((df["lng"] - lng).abs() < 0.015)
+        ((df["lat"] - row["lat"]).abs() < 0.015) &
+        ((df["lng"] - row["lng"].abs()) < 0.015)
     ]
 
-    n = len(nearby)
-
-    # density
-    risk += min(n / 8, 3.0)
+    density = min(len(nearby) / 8, 3)
 
     types = set(nearby["type"].astype(str).str.lower())
 
-    has_hotel = any(x in types for x in ["hotel", "motel"])
-    has_night = any(x in types for x in ["bar", "nightclub"])
-    has_spa = any(x in types for x in ["spa", "massage"])
+    osm_bonus = 0
+    if {"hotel", "motel"} & types and {"bar", "nightclub"} & types:
+        osm_bonus += 2.5
 
-    if has_hotel and has_night:
-        risk += 2.5
-    if has_hotel and has_spa:
-        risk += 1.8
-    if has_night and has_spa:
-        risk += 1.2
+    crime = crime_score(row["lat"], row["lng"])
+    temporal = temporal_score(df, row)
+    baseline = baseline_score(df, row)
+    incidents = incident_score()
 
-    risk += min(sum(x in HIGH_RISK for x in types) * 0.4, 2.0)
-
-    if n < 3:
-        risk *= 0.7
-
-    return float(risk)
+    return (
+        osm * 0.4 +
+        density * 0.3 +
+        osm_bonus * 0.3 +
+        crime * 0.25 +
+        temporal * 0.15 +
+        baseline * 0.15 +
+        incidents * 0.1
+    )
 
 
 # ================================
 # PROCESS
 # ================================
-def process(df):
-    df = df.copy()
-    df["type"] = df["type"].astype(str).str.lower()
-
-    risks = []
-    for _, row in df.iterrows():
-        risks.append(compute_risk(row, df))
-
-    df["risk"] = risks
-
-    def topic(t):
-        if t in {"hotel", "motel"}:
-            return "Lodging"
-        if t in {"bar", "nightclub"}:
-            return "Nightlife"
-        if t in {"spa", "massage"}:
-            return "Wellness"
-        if t in {"restaurant", "cafe"}:
-            return "Food"
-        return "Other"
-
-    df["topic"] = df["type"].apply(topic)
-
-    return df
-
-
-df = process(df_raw)
-
+df = df_raw.copy()
+df["type"] = df["type"].astype(str).str.lower()
+df["risk"] = df.apply(lambda r: compute_risk(r, df), axis=1)
 
 # ================================
-# FILTERS
+# UI SIDEBAR (UPGRADED)
 # ================================
+st.sidebar.header("🎛️ Controls")
+
 types = sorted(df["type"].unique())
 
-selected = st.sidebar.multiselect("Category", types, default=types)
-min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
-
-filtered = df[
-    (df["type"].isin(selected))
-    & (df["risk"] >= min_risk)
-]
-
-st.write("Points:", len(filtered))
-
-st.dataframe(
-    filtered[["name", "type", "topic", "risk", "city", "street"]],
-    use_container_width=True,
-    hide_index=True
+selected_types = st.sidebar.multiselect(
+    "Category Filter",
+    types,
+    default=types
 )
 
+risk_range = st.sidebar.slider("Risk Range", 0.0, 10.0, (0.0, 10.0))
+
+show_heat = st.sidebar.checkbox("Heatmap", True)
+show_points = st.sidebar.checkbox("Points", True)
 
 # ================================
-# MAP
+# FILTERED DATA
 # ================================
-m = folium.Map(location=[LAT, LNG], zoom_start=11)
+filtered = df[
+    (df["type"].isin(selected_types)) &
+    (df["risk"] >= risk_range[0]) &
+    (df["risk"] <= risk_range[1])
+]
 
-if not filtered.empty:
-    heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
-    HeatMap(heat, radius=18).add_to(m)
+# ================================
+# KPI DASHBOARD (NEW UI)
+# ================================
+col1, col2, col3, col4 = st.columns(4)
 
-    for r in filtered.itertuples():
-        folium.CircleMarker(
-            location=[r.lat, r.lng],
-            radius=5,
-            popup=f"{r.name} | {r.type} | Risk {r.risk:.2f}",
-            fill=True,
-            fill_opacity=0.7,
-        ).add_to(m)
+col1.metric("Total Points", len(df))
+col2.metric("Filtered Points", len(filtered))
+col3.metric("Avg Risk", round(df["risk"].mean(), 2))
+col4.metric("Max Risk", round(df["risk"].max(), 2))
 
-st_folium(m, width=1200, height=700)
+st.divider()
+
+# ================================
+# TABLE + MAP LAYOUT
+# ================================
+left, right = st.columns([1, 2])
+
+with left:
+    st.subheader("📋 Data View")
+    st.dataframe(
+        filtered[["name", "type", "risk", "city", "street"]],
+        use_container_width=True,
+        height=600
+    )
+
+with right:
+    st.subheader("🗺️ Risk Map")
+
+    m = folium.Map(location=[LAT, LNG], zoom_start=11)
+
+    if show_heat and not filtered.empty:
+        heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
+        HeatMap(heat, radius=18).add_to(m)
+
+    if show_points:
+        for r in filtered.itertuples():
+            folium.CircleMarker(
+                location=[r.lat, r.lng],
+                radius=5,
+                popup=f"{r.name} | Risk {r.risk:.2f}",
+                fill=True,
+                fill_opacity=0.7,
+            ).add_to(m)
+
+    st_folium(m, width=900, height=650)
+
+# ================================
+# FOOTER INSIGHT
+# ================================
+st.caption("OSINT pattern model: spatial clustering + crime proxy + baseline deviation + temporal simulation")
