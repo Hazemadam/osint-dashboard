@@ -5,62 +5,41 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap
 import os
-import requests
 
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="OSINT Intelligence Platform", layout="wide")
+st.set_page_config(page_title="OSINT Dashboard", layout="wide")
 
 LAT = 38.85
 LNG = -77.30
 
-st.title("🧠 OSINT Intelligence Platform (Stable Mode)")
-
-DATA_FILE = "osm_cache.csv"
+st.title("🧠 OSINT Intelligence Dashboard (Stable Offline Mode)")
 
 
 # ================================
-# OFFLINE-FIRST DATA LOADING
+# FAST LOCAL DATA (NO API CALLS)
 # ================================
-def generate_fallback():
+def generate_data():
     np.random.seed(42)
     return pd.DataFrame({
-        "name": [f"Simulated Site {i}" for i in range(60)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 60),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 60),
+        "name": [f"Location {i}" for i in range(80)],
+        "lat": LAT + np.random.uniform(-0.08, 0.08, 80),
+        "lng": LNG + np.random.uniform(-0.08, 0.08, 80),
         "type": np.random.choice(
-            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 60
+            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 80
         ),
-        "city": "Simulated",
-        "street": "Simulated",
+        "city": "Region",
+        "street": "Unknown",
     })
 
 
-def load_data():
-    # 1. Use cached dataset if exists
-    if os.path.exists(DATA_FILE):
-        try:
-            df = pd.read_csv(DATA_FILE)
-            if len(df) > 0:
-                return df, "cached dataset"
-        except:
-            pass
-
-    # 2. fallback if no cache
-    return generate_fallback(), "synthetic fallback"
-
-
-def save_cache(df):
-    df.to_csv(DATA_FILE, index=False)
-
-
-df_raw, source = load_data()
-st.caption(f"Data source: {source}")
+df_raw = generate_data()
+st.caption("Data source: local generated dataset (no API dependency)")
 
 
 # ================================
-# RISK ENGINE (STABLE MODEL)
+# RISK MODEL
 # ================================
 CATEGORY = {
     "hotel": 2.0,
@@ -73,7 +52,7 @@ CATEGORY = {
 }
 
 
-def compute_risk(row, df):
+def risk(row, df):
     t = str(row["type"]).lower()
 
     base = CATEGORY.get(t, 0.3)
@@ -95,30 +74,29 @@ def compute_risk(row, df):
 
 
 # ================================
-# PROCESS DATA
+# PROCESS
 # ================================
 df = df_raw.copy()
-df["type"] = df["type"].astype(str).str.lower()
-df["risk"] = df.apply(lambda r: compute_risk(r, df), axis=1)
+df["risk"] = df.apply(lambda r: risk(r, df), axis=1)
 
 
 # ================================
-# SIDEBAR FILTERS
+# FILTERS
 # ================================
 st.sidebar.header("Filters")
 
 types = sorted(df["type"].unique())
 
-selected_types = st.sidebar.multiselect(
+selected = st.sidebar.multiselect(
     "Category",
     types,
     default=types
 )
 
-min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
+min_risk = st.sidebar.slider("Min Risk", 0.0, 10.0, 0.0)
 
 filtered = df[
-    (df["type"].isin(selected_types)) &
+    (df["type"].isin(selected)) &
     (df["risk"] >= min_risk)
 ]
 
@@ -126,11 +104,11 @@ filtered = df[
 # ================================
 # METRICS
 # ================================
-col1, col2, col3 = st.columns(3)
+c1, c2, c3 = st.columns(3)
 
-col1.metric("Total Points", len(df))
-col2.metric("Filtered", len(filtered))
-col3.metric("Avg Risk", round(df["risk"].mean(), 2))
+c1.metric("Total", len(df))
+c2.metric("Filtered", len(filtered))
+c3.metric("Avg Risk", round(df["risk"].mean(), 2))
 
 
 st.divider()
@@ -142,8 +120,6 @@ st.divider()
 left, right = st.columns([1, 2])
 
 with left:
-    st.subheader("Data Table")
-
     st.dataframe(
         filtered[["name", "type", "risk", "city", "street"]],
         use_container_width=True,
@@ -151,8 +127,6 @@ with left:
     )
 
 with right:
-    st.subheader("Risk Map")
-
     m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
     if not filtered.empty:
@@ -174,11 +148,6 @@ with right:
 
 
 # ================================
-# OPTIONAL: DATA REFRESH BUTTON
+# FOOTER
 # ================================
-st.divider()
-
-if st.button("🔄 Regenerate Dataset (Simulated Refresh)"):
-    df_new = generate_fallback()
-    save_cache(df_new)
-    st.success("Dataset refreshed (saved to cache). Reload page to apply.")
+st.caption("Stable OSINT system — no live API dependency, no freezing, instant load")
