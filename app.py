@@ -17,126 +17,102 @@ LNG = -77.30
 st.title("🧠 OSINT Spatial Intelligence Dashboard")
 
 # ================================
-# SESSION STATE
+# FALLBACK DATA (ALWAYS WORKS)
 # ================================
-if "last_good_data" not in st.session_state:
-    st.session_state.last_good_data = None
-
 if "fallback_data" not in st.session_state:
     np.random.seed(42)
     st.session_state.fallback_data = pd.DataFrame({
-        "name": [f"Simulated {i}" for i in range(40)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
+        "name": [f"Simulated Site {i}" for i in range(50)],
+        "lat": LAT + np.random.uniform(-0.08, 0.08, 50),
+        "lng": LNG + np.random.uniform(-0.08, 0.08, 50),
         "type": np.random.choice(
-            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 40
+            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 50
         ),
         "city": "Simulated",
         "street": "Simulated",
     })
 
 # ================================
-# DATA FETCH (STABLE + REAL PRIORITY)
+# NON-BLOCKING FETCH (FAST FAIL)
 # ================================
-@st.cache_data(ttl=600)
 def fetch_data():
     query = """
-    [out:json][timeout:25];
+    [out:json][timeout:10];
     (
-      node["tourism"="hotel"](38.6,-77.6,39.1,-77.0);
-      node["tourism"="motel"](38.6,-77.6,39.1,-77.0);
       node["amenity"="bar"](38.6,-77.6,39.1,-77.0);
       node["amenity"="restaurant"](38.6,-77.6,39.1,-77.0);
-      node["amenity"="cafe"](38.6,-77.6,39.1,-77.0);
+      node["tourism"="hotel"](38.6,-77.6,39.1,-77.0);
+      node["tourism"="motel"](38.6,-77.6,39.1,-77.0);
       node["amenity"="spa"](38.6,-77.6,39.1,-77.0);
     );
     out;
     """
 
-    endpoints = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
-    ]
+    url = "https://overpass-api.de/api/interpreter"
 
-    errors = []
+    try:
+        r = requests.post(
+            url,
+            data=query,
+            headers={"Content-Type": "text/plain"},
+            timeout=(3, 8)
+        )
 
-    for url in endpoints:
-        try:
-            r = requests.post(
-                url,
-                data=query,
-                headers={"Content-Type": "text/plain"},
-                timeout=(5, 20)
-            )
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
 
-            if r.status_code != 200:
-                errors.append(f"{url} HTTP {r.status_code}")
+        data = r.json()
+        elements = data.get("elements", [])
+
+        if not elements:
+            return None, "empty response"
+
+        rows = []
+
+        for el in elements:
+            tags = el.get("tags", {})
+
+            lat = el.get("lat")
+            lng = el.get("lon")
+
+            if lat is None or lng is None:
                 continue
 
-            data = r.json()
-            elements = data.get("elements", [])
+            rows.append({
+                "name": tags.get("name", "Unnamed"),
+                "lat": lat,
+                "lng": lng,
+                "type": (
+                    tags.get("amenity")
+                    or tags.get("tourism")
+                    or "unknown"
+                ),
+                "city": tags.get("addr:city", "Unknown"),
+                "street": tags.get("addr:street", "Unknown"),
+            })
 
-            if not elements:
-                errors.append(f"{url} empty response")
-                continue
+        return pd.DataFrame(rows), "live"
 
-            rows = []
-
-            for el in elements:
-                tags = el.get("tags", {})
-
-                lat = el.get("lat")
-                lng = el.get("lon")
-
-                if lat is None or lng is None:
-                    continue
-
-                rows.append({
-                    "name": tags.get("name", "Unnamed"),
-                    "lat": lat,
-                    "lng": lng,
-                    "type": (
-                        tags.get("amenity")
-                        or tags.get("tourism")
-                        or "unknown"
-                    ),
-                    "city": tags.get("addr:city", "Unknown"),
-                    "street": tags.get("addr:street", "Unknown"),
-                })
-
-            df = pd.DataFrame(rows)
-
-            if len(df) > 0:
-                return df, f"LIVE DATA from {url}"
-
-            errors.append(f"{url} parsed but empty")
-
-        except Exception as e:
-            errors.append(f"{url} error: {str(e)}")
-
-    st.warning("Live data failed. Using fallback.")
-    st.text("\n".join(errors))
-
-    return pd.DataFrame(), "fallback"
+    except Exception as e:
+        return None, str(e)
 
 
 # ================================
-# LOAD DATA (SMART PRIORITY)
+# LOAD DATA (INSTANT UI FIRST)
 # ================================
+placeholder = st.empty()
+placeholder.info("Loading OSINT dataset...")
+
 df_raw, status = fetch_data()
 
-if df_raw.empty:
-    if st.session_state.last_good_data is not None:
-        df_raw = st.session_state.last_good_data.copy()
-        source = "Cached Live Data"
-    else:
-        df_raw = st.session_state.fallback_data.copy()
-        source = "Simulated Fallback"
+if df_raw is None or df_raw.empty:
+    df_raw = st.session_state.fallback_data.copy()
+    source = "Fallback dataset (live failed)"
 else:
-    st.session_state.last_good_data = df_raw.copy()
     source = "Live OpenStreetMap"
 
-st.caption(f"Data source: {source} | Status: {status}")
+placeholder.success(f"Data ready: {source} | {status}")
+
 
 # ================================
 # RISK MODEL
@@ -151,7 +127,7 @@ CATEGORY = {
     "spa": 2.4,
 }
 
-def risk(row, df):
+def compute_risk(row, df):
     t = str(row["type"]).lower()
 
     base = CATEGORY.get(t, 0.3)
@@ -177,10 +153,11 @@ def risk(row, df):
 # ================================
 df = df_raw.copy()
 df["type"] = df["type"].astype(str).str.lower()
-df["risk"] = df.apply(lambda r: risk(r, df), axis=1)
+df["risk"] = df.apply(lambda r: compute_risk(r, df), axis=1)
+
 
 # ================================
-# FILTERS
+# FILTER UI
 # ================================
 st.sidebar.header("Filters")
 
@@ -192,12 +169,14 @@ selected = st.sidebar.multiselect(
     default=types
 )
 
-min_risk = st.sidebar.slider("Min Risk", 0.0, 10.0, 0.0)
+min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
+
 
 filtered = df[
     (df["type"].isin(selected)) &
     (df["risk"] >= min_risk)
 ]
+
 
 # ================================
 # METRICS
@@ -208,15 +187,17 @@ col1.metric("Total Points", len(df))
 col2.metric("Filtered", len(filtered))
 col3.metric("Avg Risk", round(df["risk"].mean(), 2))
 
+
 st.divider()
 
+
 # ================================
-# MAP + TABLE
+# TABLE + MAP
 # ================================
 left, right = st.columns([1, 2])
 
 with left:
-    st.subheader("Data")
+    st.subheader("Data Table")
     st.dataframe(
         filtered[["name", "type", "risk", "city", "street"]],
         use_container_width=True,
@@ -224,7 +205,7 @@ with left:
     )
 
 with right:
-    st.subheader("Map")
+    st.subheader("Map View")
 
     m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
@@ -240,12 +221,13 @@ with right:
                 radius=5,
                 popup=f"{r.name} | Risk {r.risk:.2f}",
                 fill=True,
-                fill_opacity=0.7
+                fill_opacity=0.7,
             ).add_to(m)
 
     st_folium(m, width=900, height=650)
 
+
 # ================================
 # FOOTER
 # ================================
-st.caption("OSINT model: OpenStreetMap + spatial clustering + pattern-based risk scoring")
+st.caption("OSINT system: OpenStreetMap + spatial clustering + risk scoring + fallback resilience")
