@@ -22,10 +22,10 @@ LNG = -77.30
 st.title("🧠 OSINT Spatial Intelligence Dashboard")
 
 # ================================
-# SESSION STATE
+# STATE MANAGEMENT
 # ================================
-if "last_live_data" not in st.session_state:
-    st.session_state.last_live_data = None
+if "last_good_data" not in st.session_state:
+    st.session_state.last_good_data = None
 
 if "fallback_data" not in st.session_state:
     np.random.seed(42)
@@ -42,33 +42,56 @@ if "fallback_data" not in st.session_state:
     })
 
 # ================================
-# DATA FETCH
+# DATA FETCH (ROBUST PIPELINE)
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
     query = """
-    [out:json][timeout:20];
+    [out:json][timeout:25];
     (
-      nwr["tourism"~"hotel|motel"](38.6,-77.6,39.1,-77.0);
-      nwr["amenity"~"bar|nightclub|cafe|restaurant|spa"](38.6,-77.6,39.1,-77.0);
-      nwr["shop"="massage"](38.6,-77.6,39.1,-77.0);
-    );
+      nwr["tourism"="hotel"];
+      nwr["tourism"="motel"];
+      nwr["amenity"="bar"];
+      nwr["amenity"="nightclub"];
+      nwr["amenity"="cafe"];
+      nwr["amenity"="restaurant"];
+      nwr["amenity"="spa"];
+      nwr["shop"="massage"];
+    )(38.6,-77.6,39.1,-77.0);
     out center;
     """
 
-    urls = [
-        "https://overpass.kumi.systems/api/interpreter",
+    endpoints = [
         "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
     ]
 
-    for url in urls:
+    errors = []
+
+    for url in endpoints:
         try:
-            r = requests.post(url, data=query, timeout=20)
-            r.raise_for_status()
+            r = requests.post(
+                url,
+                data=query,
+                headers={"Content-Type": "text/plain"},
+                timeout=30
+            )
+
+            if r.status_code != 200:
+                errors.append(f"{url} → HTTP {r.status_code}")
+                continue
+
             data = r.json()
+            elements = data.get("elements", [])
+
+            if not elements:
+                errors.append(f"{url} → empty response")
+                continue
 
             rows = []
-            for el in data.get("elements", []):
+
+            for el in elements:
                 tags = el.get("tags", {})
                 lat = el.get("lat") or el.get("center", {}).get("lat")
                 lng = el.get("lon") or el.get("center", {}).get("lon")
@@ -91,27 +114,41 @@ def fetch_data():
                 })
 
             df = pd.DataFrame(rows)
-            if not df.empty:
-                return df, "Live OSM data"
 
-        except:
-            continue
+            if len(df) > 0:
+                return df, f"Live OSM data from {url}"
 
-    return pd.DataFrame(), "Fallback used"
+            errors.append(f"{url} → parsed but empty dataset")
+
+        except Exception as e:
+            errors.append(f"{url} → {str(e)}")
+
+    st.warning("Live data unavailable. Reasons:\n" + "\n".join(errors))
+
+    return pd.DataFrame(), "fallback"
 
 
 # ================================
-# LOAD
+# LOAD DATA (SMART FALLBACK SYSTEM)
 # ================================
 df_raw, status = fetch_data()
 
 if df_raw.empty:
-    df_raw = st.session_state.fallback_data.copy()
+    if st.session_state.last_good_data is not None:
+        df_raw = st.session_state.last_good_data.copy()
+        data_source = "Cached last-good live dataset"
+    else:
+        df_raw = st.session_state.fallback_data.copy()
+        data_source = "Synthetic fallback dataset"
+else:
+    st.session_state.last_good_data = df_raw.copy()
+    data_source = "Live OpenStreetMap"
 
-st.caption(f"Data source: {status}")
+st.caption(f"Data source: {data_source}")
+
 
 # ================================
-# OSINT RISK ENGINE (MULTI-LAYER)
+# OSINT RISK ENGINE (STABLE VERSION)
 # ================================
 CATEGORY_WEIGHTS = {
     "hotel": 2.0,
@@ -128,100 +165,70 @@ CATEGORY_WEIGHTS = {
 HIGH_RISK = {"hotel", "motel", "nightclub", "bar", "spa", "massage"}
 
 
-def crime_score(lat, lng):
-    return max(0, 3 - abs(lat - LAT) * 50)
-
-
-def temporal_score(df, row):
-    nearby = df[
-        ((df["lat"] - row["lat"]).abs() < 0.02) &
-        ((df["lng"] - row["lng"]).abs() < 0.02)
-    ]
-    return min(len(nearby) / 6, 3)
-
-
-def baseline_score(df, row):
-    local = len(df[
-        ((df["lat"] - row["lat"]).abs() < 0.02) &
-        ((df["lng"] - row["lng"]).abs() < 0.02)
-    ])
-    return max(0, local / 10)
-
-
-def incident_score():
-    return np.random.uniform(0, 1.2)
-
-
 def compute_risk(row, df):
+    lat, lng = row["lat"], row["lng"]
     t = str(row["type"]).lower()
 
-    osm = CATEGORY_WEIGHTS.get(t, 0.3)
+    base = CATEGORY_WEIGHTS.get(t, 0.3)
 
     nearby = df[
-        ((df["lat"] - row["lat"]).abs() < 0.015) &
-        ((df["lng"] - row["lng"].abs()) < 0.015)
+        ((df["lat"] - lat).abs() < 0.015) &
+        ((df["lng"] - lng).abs() < 0.015)
     ]
 
-    density = min(len(nearby) / 8, 3)
+    density = min(len(nearby) / 8, 3.0)
 
     types = set(nearby["type"].astype(str).str.lower())
 
-    osm_bonus = 0
+    combo_bonus = 0
     if {"hotel", "motel"} & types and {"bar", "nightclub"} & types:
-        osm_bonus += 2.5
+        combo_bonus += 2.5
+    if {"hotel", "motel"} & types and {"spa", "massage"} & types:
+        combo_bonus += 1.8
 
-    crime = crime_score(row["lat"], row["lng"])
-    temporal = temporal_score(df, row)
-    baseline = baseline_score(df, row)
-    incidents = incident_score()
+    cluster_bonus = min(sum(x in HIGH_RISK for x in types) * 0.4, 2.0)
 
-    return (
-        osm * 0.4 +
-        density * 0.3 +
-        osm_bonus * 0.3 +
-        crime * 0.25 +
-        temporal * 0.15 +
-        baseline * 0.15 +
-        incidents * 0.1
-    )
+    if len(nearby) < 3:
+        density *= 0.7
+
+    return float(base + density + combo_bonus + cluster_bonus)
 
 
 # ================================
-# PROCESS
+# PROCESS DATA
 # ================================
 df = df_raw.copy()
 df["type"] = df["type"].astype(str).str.lower()
 df["risk"] = df.apply(lambda r: compute_risk(r, df), axis=1)
 
+
 # ================================
-# UI SIDEBAR (UPGRADED)
+# FILTER UI
 # ================================
 st.sidebar.header("🎛️ Controls")
 
 types = sorted(df["type"].unique())
 
 selected_types = st.sidebar.multiselect(
-    "Category Filter",
+    "Categories",
     types,
     default=types
 )
 
-risk_range = st.sidebar.slider("Risk Range", 0.0, 10.0, (0.0, 10.0))
+min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
 
 show_heat = st.sidebar.checkbox("Heatmap", True)
 show_points = st.sidebar.checkbox("Points", True)
 
-# ================================
-# FILTERED DATA
-# ================================
+
 filtered = df[
     (df["type"].isin(selected_types)) &
-    (df["risk"] >= risk_range[0]) &
-    (df["risk"] <= risk_range[1])
+    (df["risk"] >= min_risk)
 ]
 
+
 # ================================
-# KPI DASHBOARD (NEW UI)
+# KPI DASHBOARD
 # ================================
 col1, col2, col3, col4 = st.columns(4)
 
@@ -232,13 +239,14 @@ col4.metric("Max Risk", round(df["risk"].max(), 2))
 
 st.divider()
 
+
 # ================================
-# TABLE + MAP LAYOUT
+# TABLE + MAP
 # ================================
 left, right = st.columns([1, 2])
 
 with left:
-    st.subheader("📋 Data View")
+    st.subheader("📋 Data")
     st.dataframe(
         filtered[["name", "type", "risk", "city", "street"]],
         use_container_width=True,
@@ -251,8 +259,10 @@ with right:
     m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
     if show_heat and not filtered.empty:
-        heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
-        HeatMap(heat, radius=18).add_to(m)
+        HeatMap(
+            [[r.lat, r.lng, r.risk] for r in filtered.itertuples()],
+            radius=18
+        ).add_to(m)
 
     if show_points:
         for r in filtered.itertuples():
@@ -266,7 +276,5 @@ with right:
 
     st_folium(m, width=900, height=650)
 
-# ================================
-# FOOTER INSIGHT
-# ================================
-st.caption("OSINT pattern model: spatial clustering + crime proxy + baseline deviation + temporal simulation")
+
+st.caption("Hybrid OSINT model: OpenStreetMap + spatial clustering + pattern-based risk scoring + resilient fallback system")
