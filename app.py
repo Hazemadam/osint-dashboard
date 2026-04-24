@@ -18,12 +18,12 @@ LNG = -77.30
 st.title("🗺️ OSINT Hotspot Dashboard (Fully Stable)")
 
 # ================================
-# 1. DATA (cached)
+# 1. DATA (ROBUST FETCH + FAILOVER)
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
     query = """
-    [out:json];
+    [out:json][timeout:10];
     (
       node["tourism"="hotel"](38.6,-77.6,39.1,-77.0);
       node["tourism"="motel"](38.6,-77.6,39.1,-77.0);
@@ -35,43 +35,54 @@ def fetch_data():
     out;
     """
 
-    url = "https://overpass.kumi.systems/api/interpreter"
+    urls = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
+    ]
 
-    try:
-        r = requests.post(
-            url,
-            data=query,
-            headers={"Content-Type": "text/plain"},
-            timeout=30
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        st.warning(f"Overpass issue: {e}")
-        return pd.DataFrame()
+    for url in urls:
+        try:
+            r = requests.post(
+                url,
+                data=query,
+                headers={"Content-Type": "text/plain"},
+                timeout=15
+            )
+            r.raise_for_status()
+            data = r.json()
 
-    rows = []
-    for el in data.get("elements", []):
-        tags = el.get("tags", {})
+            rows = []
+            for el in data.get("elements", []):
+                tags = el.get("tags", {})
 
-        rows.append({
-            "name": tags.get("name", "unknown"),
-            "lat": el.get("lat"),
-            "lng": el.get("lon"),
-            "type": tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown"
-        })
+                rows.append({
+                    "name": tags.get("name", "unknown"),
+                    "lat": el.get("lat"),
+                    "lng": el.get("lon"),
+                    "type": tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown"
+                })
 
-    return pd.DataFrame(rows)
+            return pd.DataFrame(rows)
 
-df_raw = fetch_data()
+        except Exception:
+            continue
+
+    return pd.DataFrame()
 
 # ================================
-# 2. STABLE FALLBACK (CRITICAL FIX)
+# LOADING (WITH SPINNER)
+# ================================
+with st.spinner("Fetching live OSINT data..."):
+    df_raw = fetch_data()
+
+# ================================
+# 2. STABLE FALLBACK (NO RANDOM FLICKER)
 # ================================
 if df_raw.empty:
-    st.warning("Using fallback dataset")
+    st.warning("Using fallback dataset (stable mode)")
 
     if "fallback_data" not in st.session_state:
+        np.random.seed(42)  # IMPORTANT: stops heatmap shifting forever
         st.session_state.fallback_data = pd.DataFrame({
             "name": [f"synthetic_{i}" for i in range(40)],
             "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
@@ -82,7 +93,7 @@ if df_raw.empty:
     df_raw = st.session_state.fallback_data
 
 # ================================
-# 3. PROCESSING
+# 3. PROCESSING (SAFE + CACHED)
 # ================================
 @st.cache_data
 def process(df):
@@ -142,7 +153,7 @@ filtered = df[
 st.write("Points:", len(filtered))
 
 # ================================
-# 6. MAP (STABLE)
+# 6. MAP (STABLE RENDER)
 # ================================
 m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
@@ -158,4 +169,9 @@ if len(filtered) > 0:
             fill=True
         ).add_to(m)
 
-st_folium(m, width=1200, height=700, key="osint_map")
+st_folium(
+    m,
+    width=1200,
+    height=700,
+    key="osint_map"
+)
