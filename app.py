@@ -18,17 +18,20 @@ LNG = -77.30
 
 st.title("🗺️ OSINT Intelligence Dashboard")
 
-# Keep a stable last-known-good dataset in memory
+# Keep last known good dataset
 if "last_live_data" not in st.session_state:
     st.session_state.last_live_data = None
 
+# fallback dataset
 if "fallback_data" not in st.session_state:
     np.random.seed(42)
     st.session_state.fallback_data = pd.DataFrame({
         "name": [f"Simulated Location {i}" for i in range(40)],
         "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
         "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
-        "type": np.random.choice(["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 40),
+        "type": np.random.choice(
+            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 40
+        ),
         "city": "Simulated Region",
         "street": "Simulated Area",
         "source": "Synthetic Model",
@@ -37,42 +40,10 @@ if "fallback_data" not in st.session_state:
     })
 
 # ================================
-# HELPERS
-# ================================
-def topic_for(category: str) -> str:
-    c = str(category).lower()
-    if c in {"hotel", "motel"}:
-        return "Lodging"
-    if c in {"bar", "nightclub"}:
-        return "Nightlife"
-    if c in {"cafe", "restaurant"}:
-        return "Food / Drink"
-    if c in {"spa", "massage"}:
-        return "Wellness"
-    if c in {"shop"}:
-        return "Retail"
-    return "Other"
-
-def score_for(category: str) -> float:
-    c = str(category).lower()
-    if c in {"hotel", "motel"}:
-        return 2.5
-    if c in {"spa", "massage"}:
-        return 3.5
-    if c in {"bar", "nightclub"}:
-        return 1.8
-    if c in {"cafe", "restaurant"}:
-        return 1.2
-    if c in {"shop"}:
-        return 0.8
-    return 0.5
-
-# ================================
-# 1. DATA FETCH (ROBUST + REPORTED)
+# DATA FETCH
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
-    # Narrower, higher-signal query than "any amenity/tourism/shop"
     query = """
     [out:json][timeout:20];
     (
@@ -108,13 +79,8 @@ def fetch_data():
                 rows = []
                 for el in data.get("elements", []):
                     tags = el.get("tags", {})
-                    lat = el.get("lat")
-                    lng = el.get("lon")
-
-                    if lat is None or lng is None:
-                        center = el.get("center", {})
-                        lat = center.get("lat")
-                        lng = center.get("lon")
+                    lat = el.get("lat") or el.get("center", {}).get("lat")
+                    lng = el.get("lon") or el.get("center", {}).get("lon")
 
                     if lat is None or lng is None:
                         continue
@@ -126,9 +92,7 @@ def fetch_data():
                         "lat": lat,
                         "lng": lng,
                         "type": category,
-                        "topic": topic_for(category),
-                        "risk": score_for(category),
-                        "city": tags.get("addr:city") or tags.get("is_in:city") or "Unknown",
+                        "city": tags.get("addr:city") or "Unknown",
                         "street": tags.get("addr:street") or "Unknown",
                         "source": "OpenStreetMap",
                         "osm_type": el.get("type", "unknown"),
@@ -138,76 +102,132 @@ def fetch_data():
                 df = pd.DataFrame(rows)
                 if not df.empty:
                     return df, f"Live data loaded from {url}"
+
                 last_error = f"{url} returned 0 rows."
+
             except Exception as e:
                 last_error = f"{url} attempt {attempt + 1} failed: {e}"
                 time.sleep(1.5)
 
     return pd.DataFrame(), last_error
 
+
 # ================================
-# LOAD
+# LOAD DATA
 # ================================
 with st.spinner("Fetching live OSINT data..."):
     df_raw, fetch_status = fetch_data()
 
-# Prefer last successful live data over synthetic fallback
-data_source_label = "Live OpenStreetMap data"
 if df_raw.empty:
-    if st.session_state.last_live_data is not None and not st.session_state.last_live_data.empty:
+    if st.session_state.last_live_data is not None:
         df_raw = st.session_state.last_live_data.copy()
         data_source_label = "Last successful live data"
     else:
         df_raw = st.session_state.fallback_data.copy()
         data_source_label = "Stable fallback dataset"
-
-# Save live data when available
-if not df_raw.empty and data_source_label == "Live OpenStreetMap data":
+else:
     st.session_state.last_live_data = df_raw.copy()
+    data_source_label = "Live OpenStreetMap data"
 
 st.sidebar.header("Filters")
 st.sidebar.caption(f"Fetch status: {fetch_status}")
 st.caption(f"Data source: {data_source_label}")
 
+
 # ================================
-# 2. PROCESSING
+# RISK ENGINE (NEW OSINT MODEL)
+# ================================
+CATEGORY_WEIGHTS = {
+    "hotel": 2.0,
+    "motel": 2.2,
+    "nightclub": 1.8,
+    "bar": 1.3,
+    "spa": 2.4,
+    "massage": 2.6,
+    "restaurant": 0.8,
+    "cafe": 0.6,
+    "shop": 0.4,
+}
+
+HIGH_RISK_GROUPS = {"hotel", "motel", "nightclub", "bar", "spa", "massage"}
+
+
+def compute_risk(row, df):
+    lat, lng = row["lat"], row["lng"]
+    category = str(row["type"]).lower()
+
+    risk = CATEGORY_WEIGHTS.get(category, 0.3)
+
+    # local neighborhood window
+    nearby = df[
+        (df["lat"] - lat).abs() < 0.015
+        & (df["lng"] - lng).abs() < 0.015
+    ]
+
+    n_neighbors = len(nearby)
+
+    # density signal
+    risk += min(n_neighbors / 8, 3.0)
+
+    nearby_types = set(nearby["type"].astype(str).str.lower())
+
+    has_hotel = any(t in nearby_types for t in ["hotel", "motel"])
+    has_nightlife = any(t in nearby_types for t in ["bar", "nightclub"])
+    has_spa = any(t in nearby_types for t in ["spa", "massage"])
+
+    # co-location patterns
+    if has_hotel and has_nightlife:
+        risk += 2.5
+    if has_hotel and has_spa:
+        risk += 1.8
+    if has_nightlife and has_spa:
+        risk += 1.2
+
+    # cluster amplification
+    high_risk_count = sum(t in HIGH_RISK_GROUPS for t in nearby_types)
+    risk += min(high_risk_count * 0.4, 2.0)
+
+    # isolation penalty
+    if n_neighbors < 3:
+        risk *= 0.7
+
+    return float(risk)
+
+
+# ================================
+# PROCESS DATA
 # ================================
 @st.cache_data
 def process(df):
     df = df.copy()
+    df["type"] = df["type"].astype(str).str.lower()
 
-    # Ensure required columns exist
-    for col in ["name", "lat", "lng", "type", "topic", "risk", "city", "street", "source", "osm_type", "osm_id"]:
-        if col not in df.columns:
-            df[col] = "Unknown"
+    df["risk"] = df.apply(lambda row: compute_risk(row, df), axis=1)
 
-    if "risk" not in df.columns:
-        df["risk"] = df["type"].apply(score_for)
+    def topic(t):
+        if t in {"hotel", "motel"}:
+            return "Lodging"
+        if t in {"bar", "nightclub"}:
+            return "Nightlife"
+        if t in {"spa", "massage"}:
+            return "Wellness"
+        if t in {"restaurant", "cafe"}:
+            return "Food"
+        return "Other"
 
-    if "topic" not in df.columns:
-        df["topic"] = df["type"].apply(topic_for)
+    df["topic"] = df["type"].apply(topic)
+    df["cluster"] = -1
 
-    if len(df) < 2:
-        df["cluster"] = -1
-        return df
-
-    coords = df[["lat", "lng"]].to_numpy()
-
-    db = DBSCAN(
-        eps=0.6 / 6371,
-        min_samples=2,
-        metric="haversine"
-    ).fit(np.radians(coords))
-
-    df["cluster"] = db.labels_
     return df
+
 
 df = process(df_raw)
 
+
 # ================================
-# 3. FILTERS
+# FILTERS
 # ================================
-types = sorted(df["type"].dropna().astype(str).unique().tolist())
+types = sorted(df["type"].dropna().unique().tolist())
 
 selected_types = st.sidebar.multiselect(
     "Category",
@@ -215,50 +235,50 @@ selected_types = st.sidebar.multiselect(
     default=types
 )
 
-min_risk = st.sidebar.slider("Minimum Risk Score", 0.0, 5.0, 0.0)
+min_risk = st.sidebar.slider("Minimum Risk Score", 0.0, 10.0, 0.0)
 
 show_table = st.sidebar.checkbox("Show data table", value=True)
 
-# ================================
-# 4. FILTERED DATA
-# ================================
+
 filtered = df[
-    (df["type"].astype(str).isin(selected_types)) &
+    (df["type"].isin(selected_types)) &
     (df["risk"] >= min_risk)
 ].copy()
 
 st.write("Points detected:", len(filtered))
 
 if show_table and not filtered.empty:
-    table_cols = ["name", "type", "topic", "risk", "city", "street", "cluster", "source"]
-    st.dataframe(filtered[table_cols], use_container_width=True, hide_index=True)
+    st.dataframe(
+        filtered[["name", "type", "topic", "risk", "city", "street", "source"]],
+        use_container_width=True,
+        hide_index=True
+    )
+
 
 # ================================
-# 5. MAP
+# MAP
 # ================================
 m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
-if len(filtered) > 0:
-    heat = [[r.lat, r.lng, float(r.risk)] for r in filtered.itertuples()]
+if not filtered.empty:
+    heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
     HeatMap(heat, radius=18).add_to(m)
 
     for r in filtered.itertuples():
-        popup_html = f"""
+        popup = f"""
         <b>{r.name}</b><br>
-        Category: {r.type}<br>
+        Type: {r.type}<br>
         Topic: {r.topic}<br>
-        Risk Score: {r.risk}<br>
+        Risk: {r.risk:.2f}<br>
         City: {r.city}<br>
         Street: {r.street}<br>
-        Cluster: {r.cluster}<br>
-        Source: {r.source}<br>
-        OSM: {r.osm_type}/{r.osm_id}
+        Source: {r.source}
         """
 
         folium.CircleMarker(
             location=[r.lat, r.lng],
             radius=5,
-            popup=folium.Popup(popup_html, max_width=320),
+            popup=folium.Popup(popup, max_width=300),
             fill=True,
             fill_opacity=0.8
         ).add_to(m)
