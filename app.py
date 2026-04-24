@@ -1,121 +1,66 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap
+import os
+import requests
 
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="OSINT Dashboard", layout="wide")
+st.set_page_config(page_title="OSINT Intelligence Platform", layout="wide")
 
 LAT = 38.85
 LNG = -77.30
 
-st.title("🧠 OSINT Spatial Intelligence Dashboard")
+st.title("🧠 OSINT Intelligence Platform (Stable Mode)")
+
+DATA_FILE = "osm_cache.csv"
+
 
 # ================================
-# FALLBACK DATA (ALWAYS WORKS)
+# OFFLINE-FIRST DATA LOADING
 # ================================
-if "fallback_data" not in st.session_state:
+def generate_fallback():
     np.random.seed(42)
-    st.session_state.fallback_data = pd.DataFrame({
-        "name": [f"Simulated Site {i}" for i in range(50)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 50),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 50),
+    return pd.DataFrame({
+        "name": [f"Simulated Site {i}" for i in range(60)],
+        "lat": LAT + np.random.uniform(-0.08, 0.08, 60),
+        "lng": LNG + np.random.uniform(-0.08, 0.08, 60),
         "type": np.random.choice(
-            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 50
+            ["hotel", "motel", "bar", "restaurant", "cafe", "spa", "nightclub"], 60
         ),
         "city": "Simulated",
         "street": "Simulated",
     })
 
-# ================================
-# NON-BLOCKING FETCH (FAST FAIL)
-# ================================
-def fetch_data():
-    query = """
-    [out:json][timeout:10];
-    (
-      node["amenity"="bar"](38.6,-77.6,39.1,-77.0);
-      node["amenity"="restaurant"](38.6,-77.6,39.1,-77.0);
-      node["tourism"="hotel"](38.6,-77.6,39.1,-77.0);
-      node["tourism"="motel"](38.6,-77.6,39.1,-77.0);
-      node["amenity"="spa"](38.6,-77.6,39.1,-77.0);
-    );
-    out;
-    """
 
-    url = "https://overpass-api.de/api/interpreter"
+def load_data():
+    # 1. Use cached dataset if exists
+    if os.path.exists(DATA_FILE):
+        try:
+            df = pd.read_csv(DATA_FILE)
+            if len(df) > 0:
+                return df, "cached dataset"
+        except:
+            pass
 
-    try:
-        r = requests.post(
-            url,
-            data=query,
-            headers={"Content-Type": "text/plain"},
-            timeout=(3, 8)
-        )
+    # 2. fallback if no cache
+    return generate_fallback(), "synthetic fallback"
 
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}"
 
-        data = r.json()
-        elements = data.get("elements", [])
+def save_cache(df):
+    df.to_csv(DATA_FILE, index=False)
 
-        if not elements:
-            return None, "empty response"
 
-        rows = []
-
-        for el in elements:
-            tags = el.get("tags", {})
-
-            lat = el.get("lat")
-            lng = el.get("lon")
-
-            if lat is None or lng is None:
-                continue
-
-            rows.append({
-                "name": tags.get("name", "Unnamed"),
-                "lat": lat,
-                "lng": lng,
-                "type": (
-                    tags.get("amenity")
-                    or tags.get("tourism")
-                    or "unknown"
-                ),
-                "city": tags.get("addr:city", "Unknown"),
-                "street": tags.get("addr:street", "Unknown"),
-            })
-
-        return pd.DataFrame(rows), "live"
-
-    except Exception as e:
-        return None, str(e)
+df_raw, source = load_data()
+st.caption(f"Data source: {source}")
 
 
 # ================================
-# LOAD DATA (INSTANT UI FIRST)
-# ================================
-placeholder = st.empty()
-placeholder.info("Loading OSINT dataset...")
-
-df_raw, status = fetch_data()
-
-if df_raw is None or df_raw.empty:
-    df_raw = st.session_state.fallback_data.copy()
-    source = "Fallback dataset (live failed)"
-else:
-    source = "Live OpenStreetMap"
-
-placeholder.success(f"Data ready: {source} | {status}")
-
-
-# ================================
-# RISK MODEL
+# RISK ENGINE (STABLE MODEL)
 # ================================
 CATEGORY = {
     "hotel": 2.0,
@@ -127,6 +72,7 @@ CATEGORY = {
     "spa": 2.4,
 }
 
+
 def compute_risk(row, df):
     t = str(row["type"]).lower()
 
@@ -137,19 +83,19 @@ def compute_risk(row, df):
         ((df["lng"] - row["lng"]).abs() < 0.015)
     ]
 
-    density = min(len(nearby) / 8, 3)
+    density = min(len(nearby) / 10, 3)
 
     types = set(nearby["type"].astype(str).str.lower())
 
-    bonus = 0
+    combo = 0
     if {"hotel", "motel"} & types and {"bar", "nightclub"} & types:
-        bonus += 2.0
+        combo += 2.0
 
-    return float(base + density + bonus)
+    return float(base + density + combo)
 
 
 # ================================
-# PROCESS
+# PROCESS DATA
 # ================================
 df = df_raw.copy()
 df["type"] = df["type"].astype(str).str.lower()
@@ -157,13 +103,13 @@ df["risk"] = df.apply(lambda r: compute_risk(r, df), axis=1)
 
 
 # ================================
-# FILTER UI
+# SIDEBAR FILTERS
 # ================================
 st.sidebar.header("Filters")
 
 types = sorted(df["type"].unique())
 
-selected = st.sidebar.multiselect(
+selected_types = st.sidebar.multiselect(
     "Category",
     types,
     default=types
@@ -171,9 +117,8 @@ selected = st.sidebar.multiselect(
 
 min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
 
-
 filtered = df[
-    (df["type"].isin(selected)) &
+    (df["type"].isin(selected_types)) &
     (df["risk"] >= min_risk)
 ]
 
@@ -192,12 +137,13 @@ st.divider()
 
 
 # ================================
-# TABLE + MAP
+# MAP + TABLE
 # ================================
 left, right = st.columns([1, 2])
 
 with left:
     st.subheader("Data Table")
+
     st.dataframe(
         filtered[["name", "type", "risk", "city", "street"]],
         use_container_width=True,
@@ -205,7 +151,7 @@ with left:
     )
 
 with right:
-    st.subheader("Map View")
+    st.subheader("Risk Map")
 
     m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
@@ -228,6 +174,11 @@ with right:
 
 
 # ================================
-# FOOTER
+# OPTIONAL: DATA REFRESH BUTTON
 # ================================
-st.caption("OSINT system: OpenStreetMap + spatial clustering + risk scoring + fallback resilience")
+st.divider()
+
+if st.button("🔄 Regenerate Dataset (Simulated Refresh)"):
+    df_new = generate_fallback()
+    save_cache(df_new)
+    st.success("Dataset refreshed (saved to cache). Reload page to apply.")
