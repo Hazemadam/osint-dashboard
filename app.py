@@ -32,7 +32,7 @@ st.markdown(
 )
 
 st.title("🧠 OSINT Intelligence Dashboard")
-st.caption("Instant-loading, offline-first analytics view with filters, clustering, hotspots, and map layers.")
+st.caption("Instant-loading offline-first dashboard. No live API calls at runtime.")
 
 # =========================================================
 # DATA HELPERS
@@ -54,7 +54,7 @@ CATEGORY_WEIGHTS = {
 def generate_demo_data(n: int = 120) -> pd.DataFrame:
     rng = np.random.default_rng(42)
 
-    clusters = [
+    centers = [
         (LAT + 0.020, LNG + 0.010, ["hotel", "motel", "bar", "nightclub"]),
         (LAT - 0.015, LNG - 0.018, ["spa", "massage", "hotel"]),
         (LAT + 0.030, LNG - 0.020, ["restaurant", "cafe", "bar"]),
@@ -62,7 +62,7 @@ def generate_demo_data(n: int = 120) -> pd.DataFrame:
 
     rows = []
     for i in range(n):
-        center_lat, center_lng, kinds = clusters[i % len(clusters)]
+        center_lat, center_lng, kinds = centers[i % len(centers)]
         kind = rng.choice(kinds + ["restaurant", "cafe", "hotel", "bar", "spa", "massage"])
         rows.append(
             {
@@ -76,8 +76,7 @@ def generate_demo_data(n: int = 120) -> pd.DataFrame:
             }
         )
 
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -171,7 +170,6 @@ def compute_risk_model(df: pd.DataFrame) -> pd.DataFrame:
 
     for idx, row in df.iterrows():
         t = str(row["type"]).lower()
-
         base = CATEGORY_WEIGHTS.get(t, 0.3)
 
         nearby_mask = (
@@ -244,7 +242,9 @@ def summarize_hotspots(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["cluster", "count", "avg_risk", "top_type", "center_lat", "center_lng"])
 
     clusters = []
-    for cluster_id, group in df[df["cluster"] != -1].groupby("cluster"):
+    clustered = df[df["cluster"] != -1].copy()
+
+    for cluster_id, group in clustered.groupby("cluster"):
         top_type = group["type"].mode().iloc[0] if not group["type"].mode().empty else "unknown"
         clusters.append(
             {
@@ -260,16 +260,18 @@ def summarize_hotspots(df: pd.DataFrame) -> pd.DataFrame:
     if not clusters:
         return pd.DataFrame(columns=["cluster", "count", "avg_risk", "top_type", "center_lat", "center_lng"])
 
-    out = pd.DataFrame(clusters).sort_values(["count", "avg_risk"], ascending=[False, False])
-    return out.reset_index(drop=True)
+    return pd.DataFrame(clusters).sort_values(["count", "avg_risk"], ascending=[False, False]).reset_index(drop=True)
 
 # =========================================================
 # LOAD DATA
 # =========================================================
-uploaded = st.sidebar.file_uploader("Upload CSV with columns: name, lat, lng, type, city, street, source", type=["csv"])
+uploaded = st.sidebar.file_uploader(
+    "Upload CSV with columns: name, lat, lng, type, city, street, source",
+    type=["csv"]
+)
+
 df_raw, data_source = load_initial_data(uploaded)
 
-# Save uploaded file to local cache if it was uploaded
 if uploaded is not None:
     save_cache(df_raw)
 
@@ -280,7 +282,7 @@ df = compute_risk_model(df_raw)
 # SIDEBAR CONTROLS
 # =========================================================
 st.sidebar.header("🎛️ Controls")
-st.sidebar.caption("This version does not call live APIs at runtime, so it loads instantly.")
+st.sidebar.caption("This version does not call live APIs, so it loads immediately.")
 
 types = sorted(df["type"].dropna().astype(str).unique().tolist())
 topics = sorted(df["topic"].dropna().astype(str).unique().tolist())
@@ -288,8 +290,13 @@ topics = sorted(df["topic"].dropna().astype(str).unique().tolist())
 selected_types = st.sidebar.multiselect("Category", options=types, default=types)
 selected_topics = st.sidebar.multiselect("Topic", options=topics, default=topics)
 
-risk_min, risk_max = float(df["risk"].min()), float(df["risk"].max())
-risk_range = st.sidebar.slider("Risk range", min_value=0.0, max_value=max(10.0, risk_max), value=(0.0, max(10.0, risk_max)))
+risk_max = max(10.0, float(df["risk"].max())) if len(df) else 10.0
+risk_range = st.sidebar.slider(
+    "Risk range",
+    min_value=0.0,
+    max_value=risk_max,
+    value=(0.0, risk_max),
+)
 
 cluster_choices = sorted([int(x) for x in df["cluster"].dropna().unique().tolist() if int(x) != -1])
 cluster_filter = st.sidebar.multiselect("Cluster", options=cluster_choices, default=cluster_choices)
@@ -298,6 +305,11 @@ search_text = st.sidebar.text_input("Search name / city / street", value="")
 show_heat = st.sidebar.checkbox("Heatmap", value=True)
 show_points = st.sidebar.checkbox("Points", value=True)
 show_signals = st.sidebar.checkbox("Show signals in table", value=False)
+
+if st.sidebar.button("🔄 Regenerate Demo Data"):
+    demo = generate_demo_data()
+    save_cache(demo)
+    st.rerun()
 
 # =========================================================
 # FILTER DATA
@@ -323,7 +335,7 @@ if search_text.strip():
     ].copy()
 
 # =========================================================
-# TOP METRICS
+# METRICS
 # =========================================================
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total points", len(df))
@@ -348,17 +360,23 @@ with tab1:
         type_counts = filtered["type"].value_counts()
         if len(type_counts) > 0:
             st.bar_chart(type_counts)
+        else:
+            st.info("No category data for current filters.")
 
         st.subheader("Topic mix")
         topic_counts = filtered["topic"].value_counts()
         if len(topic_counts) > 0:
             st.bar_chart(topic_counts)
+        else:
+            st.info("No topic data for current filters.")
 
     with right:
         st.subheader("Risk distribution")
-        risk_bins = pd.cut(filtered["risk"], bins=8) if len(filtered) else pd.Series(dtype="category")
         if len(filtered):
+            risk_bins = pd.cut(filtered["risk"], bins=8)
             st.bar_chart(risk_bins.value_counts().sort_index())
+        else:
+            st.info("No risk data for current filters.")
 
         st.subheader("Data quality")
         quality = pd.DataFrame(
@@ -366,8 +384,8 @@ with tab1:
                 "metric": ["rows", "clusters", "missing types", "source"],
                 "value": [
                     len(df),
-                    int((df["cluster"] != -1).sum()),
-                    int(df["type"].isna().sum()),
+                    int((df["cluster"] != -1).sum()) if len(df) else 0,
+                    int(df["type"].isna().sum()) if len(df) else 0,
                     data_source,
                 ],
             }
