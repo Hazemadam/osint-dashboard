@@ -18,7 +18,9 @@ LNG = -77.30
 
 st.title("🗺️ OSINT Intelligence Dashboard")
 
-# Keep a stable last-known-good dataset in memory
+# ================================
+# STABLE MEMORY STORAGE
+# ================================
 if "last_live_data" not in st.session_state:
     st.session_state.last_live_data = None
 
@@ -28,67 +30,33 @@ if "fallback_data" not in st.session_state:
         "name": [f"Simulated Location {i}" for i in range(40)],
         "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
         "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
-        "type": np.random.choice(["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 40),
+        "type": np.random.choice(
+            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "shop"], 40
+        ),
         "city": "Simulated Region",
         "street": "Simulated Area",
-        "source": "Synthetic Model",
-        "osm_type": "synthetic",
-        "osm_id": -1,
+        "source": "Synthetic Model"
     })
 
 # ================================
-# HELPERS
-# ================================
-def topic_for(category: str) -> str:
-    c = str(category).lower()
-    if c in {"hotel", "motel"}:
-        return "Lodging"
-    if c in {"bar", "nightclub"}:
-        return "Nightlife"
-    if c in {"cafe", "restaurant"}:
-        return "Food / Drink"
-    if c in {"spa", "massage"}:
-        return "Wellness"
-    if c in {"shop"}:
-        return "Retail"
-    return "Other"
-
-def score_for(category: str) -> float:
-    c = str(category).lower()
-    if c in {"hotel", "motel"}:
-        return 2.5
-    if c in {"spa", "massage"}:
-        return 3.5
-    if c in {"bar", "nightclub"}:
-        return 1.8
-    if c in {"cafe", "restaurant"}:
-        return 1.2
-    if c in {"shop"}:
-        return 0.8
-    return 0.5
-
-# ================================
-# 1. DATA FETCH (ROBUST + REPORTED)
+# DATA FETCH (ROBUST OVERPASS)
 # ================================
 @st.cache_data(ttl=600)
 def fetch_data():
-    # Narrower, higher-signal query than "any amenity/tourism/shop"
     query = """
-    [out:json][timeout:20];
+    [out:json][timeout:25];
     (
       nwr["tourism"~"hotel|motel"](38.6,-77.6,39.1,-77.0);
       nwr["amenity"~"bar|nightclub|cafe|restaurant|spa"](38.6,-77.6,39.1,-77.0);
-      nwr["shop"="massage"](38.6,-77.6,39.1,-77.0);
+      nwr["shop"](38.6,-77.6,39.1,-77.0);
     );
     out center;
     """
 
     urls = [
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass-api.de/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
     ]
-
-    last_error = "No live response yet."
 
     for url in urls:
         for attempt in range(3):
@@ -96,11 +64,8 @@ def fetch_data():
                 r = requests.post(
                     url,
                     data=query,
-                    headers={
-                        "Content-Type": "text/plain",
-                        "User-Agent": "streamlit-osint-dashboard/1.0"
-                    },
-                    timeout=20,
+                    headers={"Content-Type": "text/plain"},
+                    timeout=20
                 )
                 r.raise_for_status()
                 data = r.json()
@@ -108,84 +73,65 @@ def fetch_data():
                 rows = []
                 for el in data.get("elements", []):
                     tags = el.get("tags", {})
-                    lat = el.get("lat")
-                    lng = el.get("lon")
 
-                    if lat is None or lng is None:
-                        center = el.get("center", {})
-                        lat = center.get("lat")
-                        lng = center.get("lon")
+                    lat = el.get("lat") or el.get("center", {}).get("lat")
+                    lng = el.get("lon") or el.get("center", {}).get("lon")
 
                     if lat is None or lng is None:
                         continue
-
-                    category = tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown"
 
                     rows.append({
                         "name": tags.get("name") or "Unnamed Location",
                         "lat": lat,
                         "lng": lng,
-                        "type": category,
-                        "topic": topic_for(category),
-                        "risk": score_for(category),
-                        "city": tags.get("addr:city") or tags.get("is_in:city") or "Unknown",
+                        "type": tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown",
+                        "city": tags.get("addr:city") or "Unknown",
                         "street": tags.get("addr:street") or "Unknown",
-                        "source": "OpenStreetMap",
-                        "osm_type": el.get("type", "unknown"),
-                        "osm_id": el.get("id", -1),
+                        "source": "OpenStreetMap"
                     })
 
-                df = pd.DataFrame(rows)
-                if not df.empty:
-                    return df, f"Live data loaded from {url}"
-                last_error = f"{url} returned 0 rows."
-            except Exception as e:
-                last_error = f"{url} attempt {attempt + 1} failed: {e}"
+                if rows:
+                    return pd.DataFrame(rows)
+
+            except Exception:
                 time.sleep(1.5)
 
-    return pd.DataFrame(), last_error
+    return pd.DataFrame()
 
 # ================================
-# LOAD
+# LOAD DATA
 # ================================
 with st.spinner("Fetching live OSINT data..."):
-    df_raw, fetch_status = fetch_data()
+    df_raw = fetch_data()
 
-# Prefer last successful live data over synthetic fallback
-data_source_label = "Live OpenStreetMap data"
 if df_raw.empty:
-    if st.session_state.last_live_data is not None and not st.session_state.last_live_data.empty:
-        df_raw = st.session_state.last_live_data.copy()
-        data_source_label = "Last successful live data"
-    else:
-        df_raw = st.session_state.fallback_data.copy()
-        data_source_label = "Stable fallback dataset"
+    st.warning("Using stable fallback dataset")
 
-# Save live data when available
-if not df_raw.empty and data_source_label == "Live OpenStreetMap data":
+    df_raw = st.session_state.fallback_data
+
+# Save last good live dataset
+if not df_raw.empty:
     st.session_state.last_live_data = df_raw.copy()
 
-st.sidebar.header("Filters")
-st.sidebar.caption(f"Fetch status: {fetch_status}")
-st.caption(f"Data source: {data_source_label}")
-
 # ================================
-# 2. PROCESSING
+# PROCESSING
 # ================================
 @st.cache_data
 def process(df):
+    def score(t):
+        t = str(t).lower()
+        if "hotel" in t or "motel" in t:
+            return 2.5
+        if "spa" in t:
+            return 3.5
+        if "bar" in t or "nightclub" in t:
+            return 1.8
+        if "cafe" in t or "restaurant" in t:
+            return 1.2
+        return 0.5
+
     df = df.copy()
-
-    # Ensure required columns exist
-    for col in ["name", "lat", "lng", "type", "topic", "risk", "city", "street", "source", "osm_type", "osm_id"]:
-        if col not in df.columns:
-            df[col] = "Unknown"
-
-    if "risk" not in df.columns:
-        df["risk"] = df["type"].apply(score_for)
-
-    if "topic" not in df.columns:
-        df["topic"] = df["type"].apply(topic_for)
+    df["risk"] = df["type"].apply(score)
 
     if len(df) < 2:
         df["cluster"] = -1
@@ -205,9 +151,11 @@ def process(df):
 df = process(df_raw)
 
 # ================================
-# 3. FILTERS
+# FILTERS
 # ================================
-types = sorted(df["type"].dropna().astype(str).unique().tolist())
+st.sidebar.header("Filters")
+
+types = sorted(df["type"].astype(str).unique())
 
 selected_types = st.sidebar.multiselect(
     "Category",
@@ -217,50 +165,48 @@ selected_types = st.sidebar.multiselect(
 
 min_risk = st.sidebar.slider("Minimum Risk Score", 0.0, 5.0, 0.0)
 
-show_table = st.sidebar.checkbox("Show data table", value=True)
-
 # ================================
-# 4. FILTERED DATA
+# FILTER DATA
 # ================================
 filtered = df[
-    (df["type"].astype(str).isin(selected_types)) &
+    (df["type"].isin(selected_types)) &
     (df["risk"] >= min_risk)
 ].copy()
 
-st.write("Points detected:", len(filtered))
-
-if show_table and not filtered.empty:
-    table_cols = ["name", "type", "topic", "risk", "city", "street", "cluster", "source"]
-    st.dataframe(filtered[table_cols], use_container_width=True, hide_index=True)
+st.write("📍 Points detected:", len(filtered))
 
 # ================================
-# 5. MAP
+# DASHBOARD LAYOUT (MAP + TABLE)
 # ================================
-m = folium.Map(location=[LAT, LNG], zoom_start=11)
+col1, col2 = st.columns([2, 1])
 
-if len(filtered) > 0:
-    heat = [[r.lat, r.lng, float(r.risk)] for r in filtered.itertuples()]
-    HeatMap(heat, radius=18).add_to(m)
+with col1:
+    st.subheader("🗺️ Heatmap")
 
-    for r in filtered.itertuples():
-        popup_html = f"""
-        <b>{r.name}</b><br>
-        Category: {r.type}<br>
-        Topic: {r.topic}<br>
-        Risk Score: {r.risk}<br>
-        City: {r.city}<br>
-        Street: {r.street}<br>
-        Cluster: {r.cluster}<br>
-        Source: {r.source}<br>
-        OSM: {r.osm_type}/{r.osm_id}
-        """
+    m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
-        folium.CircleMarker(
-            location=[r.lat, r.lng],
-            radius=5,
-            popup=folium.Popup(popup_html, max_width=320),
-            fill=True,
-            fill_opacity=0.8
-        ).add_to(m)
+    if len(filtered) > 0:
+        heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
+        HeatMap(heat, radius=18).add_to(m)
 
-st_folium(m, width=1200, height=700, key="osint_map")
+        for r in filtered.itertuples():
+            folium.CircleMarker(
+                location=[r.lat, r.lng],
+                radius=5,
+                popup=f"{r.name} | {r.type} | {r.risk}",
+                fill=True,
+                fill_opacity=0.8
+            ).add_to(m)
+
+    st_folium(m, width=900, height=650, key="osint_map")
+
+with col2:
+    st.subheader("📊 Intelligence Table")
+
+    show_cols = ["name", "type", "risk", "city", "street", "cluster", "source"]
+
+    st.dataframe(
+        filtered[show_cols],
+        use_container_width=True,
+        height=650
+    )
