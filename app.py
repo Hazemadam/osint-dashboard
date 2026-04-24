@@ -15,7 +15,7 @@ st.set_page_config(page_title="OSINT Dashboard", layout="wide")
 LAT = 38.85
 LNG = -77.30
 
-st.title("🗺️ OSINT Hotspot Dashboard (Stable Version)")
+st.title("🗺️ OSINT Hotspot Dashboard (Fully Stable)")
 
 # ================================
 # 1. DATA (cached)
@@ -35,14 +35,19 @@ def fetch_data():
     out;
     """
 
-    url = "https://overpass-api.de/api/interpreter"
+    url = "https://overpass.kumi.systems/api/interpreter"
 
     try:
-        r = requests.post(url, data={"data": query}, timeout=30)
+        r = requests.post(
+            url,
+            data=query,
+            headers={"Content-Type": "text/plain"},
+            timeout=30
+        )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        st.error(f"Data fetch failed: {e}")
+        st.warning(f"Overpass issue: {e}")
         return pd.DataFrame()
 
     rows = []
@@ -60,18 +65,24 @@ def fetch_data():
 
 df_raw = fetch_data()
 
-# fallback
+# ================================
+# 2. STABLE FALLBACK (CRITICAL FIX)
+# ================================
 if df_raw.empty:
     st.warning("Using fallback dataset")
-    df_raw = pd.DataFrame({
-        "name": [f"synthetic_{i}" for i in range(40)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
-        "type": np.random.choice(["hotel","spa","bar","motel"], 40)
-    })
+
+    if "fallback_data" not in st.session_state:
+        st.session_state.fallback_data = pd.DataFrame({
+            "name": [f"synthetic_{i}" for i in range(40)],
+            "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
+            "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
+            "type": np.random.choice(["hotel","spa","bar","motel"], 40)
+        })
+
+    df_raw = st.session_state.fallback_data
 
 # ================================
-# 2. PROCESSING (cached)
+# 3. PROCESSING
 # ================================
 @st.cache_data
 def process(df):
@@ -101,13 +112,12 @@ def process(df):
     ).fit(np.radians(coords))
 
     df["cluster"] = db.labels_
-
     return df
 
 df = process(df_raw)
 
 # ================================
-# 3. UI
+# 4. UI
 # ================================
 st.sidebar.header("Filters")
 
@@ -119,15 +129,10 @@ selected_types = st.sidebar.multiselect(
     default=types
 )
 
-min_risk = st.sidebar.slider(
-    "Minimum Risk",
-    0.0,
-    5.0,
-    0.0
-)
+min_risk = st.sidebar.slider("Minimum Risk", 0.0, 5.0, 0.0)
 
 # ================================
-# 4. FILTER
+# 5. FILTER
 # ================================
 filtered = df[
     (df["type"].isin(selected_types)) &
@@ -137,9 +142,8 @@ filtered = df[
 st.write("Points:", len(filtered))
 
 # ================================
-# 5. MAP (MINIMIZED FLICKER)
+# 6. MAP (STABLE)
 # ================================
-# Rebuild map cleanly each run (more stable than layer stacking)
 m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
 if len(filtered) > 0:
@@ -154,10 +158,4 @@ if len(filtered) > 0:
             fill=True
         ).add_to(m)
 
-# Stable render key prevents full UI reset flicker
-st_folium(
-    m,
-    width=1200,
-    height=700,
-    key="osint_map"
-)
+st_folium(m, width=1200, height=700, key="osint_map")
