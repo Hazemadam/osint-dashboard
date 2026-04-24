@@ -159,10 +159,10 @@ def compute_risk(row, df):
     risk = CATEGORY_WEIGHTS.get(category, 0.3)
 
     # local neighborhood window
-    nearby = df[
-        (df["lat"] - lat).abs() < 0.015
-        & (df["lng"] - lng).abs() < 0.015
-    ]
+   nearby = df[
+    ((df["lat"] - lat).abs() < 0.015)
+    & ((df["lng"] - lng).abs() < 0.015)
+]
 
     n_neighbors = len(nearby)
 
@@ -202,7 +202,31 @@ def process(df):
     df = df.copy()
     df["type"] = df["type"].astype(str).str.lower()
 
-    df["risk"] = df.apply(lambda row: compute_risk(row, df), axis=1)
+    df["risk"] = def process(df):
+    df = df.copy()
+    df["type"] = df["type"].astype(str).str.lower()
+
+    risks = []
+    for _, row in df.iterrows():
+        risks.append(compute_risk(row, df))
+
+    df["risk"] = risks
+
+    def topic(t):
+        if t in {"hotel", "motel"}:
+            return "Lodging"
+        if t in {"bar", "nightclub"}:
+            return "Nightlife"
+        if t in {"spa", "massage"}:
+            return "Wellness"
+        if t in {"restaurant", "cafe"}:
+            return "Food"
+        return "Other"
+
+    df["topic"] = df["type"].apply(topic)
+    df["cluster"] = -1
+
+    return df
 
     def topic(t):
         if t in {"hotel", "motel"}:
