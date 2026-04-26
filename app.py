@@ -20,22 +20,31 @@ def load_data():
 
 poi_df, census_df = load_data()
 
-# --- THE "SURGICAL" HEATMAP LOGIC ---
-# We are going to spread the census data based on their County and Tract ID
+# --- THE SURGICAL COORDINATE DISTRIBUTOR ---
 def get_coords_for_tract(row):
-    # Base coordinates for regions
-    if "Fairfax" in row['Name']: base = [38.84, -77.30]
-    elif "Loudoun" in row['Name']: base = [39.01, -77.53]
-    elif "Arlington" in row['Name']: base = [38.88, -77.10]
-    elif "Alexandria" in row['Name']: base = [38.80, -77.04]
-    else: base = [38.85, -77.30]
+    # Core Centers
+    centers = {
+        "Fairfax": [38.8462, -77.3064],
+        "Loudoun": [39.0100, -77.5300],
+        "Arlington": [38.8816, -77.1000],
+        "Alexandria": [38.8048, -77.0469]
+    }
     
-    # Use the Tract ID digits to "offset" the point so they spread out 
-    # This turns 1 big circle into 500 small neighborhood points
+    # Identify County
+    base = centers["Fairfax"] # Default
+    for county, coord in centers.items():
+        if county in row['Name']:
+            base = coord
+            break
+            
+    # INCREASED OFFSET: This spreads the "heat" across the whole county area
+    # instead of keeping it in one tight circle.
     try:
-        offset_lat = (float(row['tract']) % 100) / 1000 - 0.05
-        offset_lng = (float(row['tract']) % 50) / 500 - 0.05
-        return [base[0] + offset_lat, base[1] + offset_lng]
+        seed = int(row['tract'])
+        np.random.seed(seed) # Makes the spread consistent every time
+        lat_off = np.random.uniform(-0.12, 0.12) 
+        lng_off = np.random.uniform(-0.12, 0.12)
+        return [base[0] + lat_off, base[1] + lng_off]
     except:
         return base
 
@@ -48,36 +57,38 @@ with col1:
     m = folium.Map(location=[38.85, -77.30], zoom_start=10, tiles="cartodbpositron")
 
     if not census_df.empty:
-        # Create a real neighborhood-level distribution
         heat_data = []
         for _, row in census_df.iterrows():
             loc = get_coords_for_tract(row)
+            # We add weight based on the vulnerability score
             heat_data.append([loc[0], loc[1], row['vulnerability_score']])
         
-        # Thinner radius makes it look like neighborhoods, not big blobs
-        HeatMap(heat_data, radius=15, blur=15, min_opacity=0.3, 
-                gradient={0.2: 'blue', 0.5: 'yellow', 0.8: 'red'}).add_to(m)
+        # Professional Gradient: Blue (Safe) -> Lime -> Red (At Risk)
+        HeatMap(heat_data, radius=25, blur=20, min_opacity=0.2, 
+                gradient={0.2: 'blue', 0.4: 'cyan', 0.6: 'lime', 0.8: 'yellow', 1.0: 'red'}).add_to(m)
 
     if not poi_df.empty:
-        # Filter: Only show "interesting" points to save memory
-        high_risk_types = ['motel', 'massage', 'spa', 'nightclub']
-        poi_priority = poi_df[poi_df['type'].isin(high_risk_types)].head(200)
+        # Focused Intelligence: High-risk business types only
+        priority_types = ['motel', 'massage', 'spa', 'nightclub', 'hotel']
+        poi_priority = poi_df[poi_df['type'].isin(priority_types)]
         
         for r in poi_priority.itertuples():
             folium.CircleMarker(
-                location=[r.lat, r.lng], radius=3, color="black",
-                weight=1, fill=True, fill_color="red", fill_opacity=0.9,
-                popup=f"{r.name} ({r.type})"
+                location=[r.lat, r.lng], radius=4, color="black",
+                weight=1, fill=True, fill_color="white", fill_opacity=0.9,
+                popup=f"<b>{r.name}</b><br>{r.type}"
             ).add_to(m)
 
     st_folium(m, width=900, height=550, returned_objects=[])
 
 with col2:
-    st.metric("Intelligence Points", f"{len(poi_df):,}")
-    st.write("---")
-    st.subheader("Priority Alerts")
+    st.metric("Total Intelligence Points", f"{len(poi_df):,}")
+    st.markdown("---")
+    st.subheader("⚠️ Critical Priority Alerts")
     
-    # Identify the Top 5 most vulnerable neighborhoods
+    # Top 5 most vulnerable neighborhoods
     top_v = census_df.sort_values('vulnerability_score', ascending=False).head(5)
     for _, row in top_v.iterrows():
-        st.error(f"**{row['Name']}**\nHigh Vulnerability Detected")
+        with st.container():
+            st.error(f"**{row['Name']}**")
+            st.caption(f"Vulnerability Score: {round(row['vulnerability_score'], 1)}")
