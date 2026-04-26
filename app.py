@@ -35,41 +35,28 @@ BASE_WEIGHTS = {
 # ================================
 # 3. DATA LOADING (GITHUB CLOUD)
 # ================================
-@st.cache_data(ttl=3600)  # Re-checks for new data every hour
+@st.cache_data(ttl=3600)
 def load_intelligence_data():
-    """
-    Reads the pre-scraped parquet file from your GitHub repository.
-    This prevents API crashes and rate-limiting.
-    """
-    # TODO: REPLACE THESE WITH YOUR ACTUAL GITHUB INFO
-    USER = "YOUR_GITHUB_USERNAME"
-    REPO = "YOUR_REPO_NAME"
+    # UPDATED WITH YOUR REAL INFO
+    USER = "Hazemadam"
+    REPO = "osint-dashboard"
     FILENAME = "nova_data.parquet" 
     
+    # This is the direct link to the file your "Robot" just created
     URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/{FILENAME}"
     
     try:
-        # Streamlit reads the parquet file directly into a dataframe
         df = pd.read_parquet(URL)
         return df, "Live GitHub Cloud Storage"
     except Exception as e:
-        # Fallback if the file isn't found or hasn't been created yet
         st.error(f"Could not load cloud data: {e}")
+        # This part stays as a backup
         dummy_data = pd.DataFrame({
-            "name": ["Sample Point (Check GitHub Action)"],
-            "lat": [LAT],
-            "lng": [LNG],
-            "type": ["cafe"],
-            "city": ["NOVA"],
-            "street": ["System"],
+            "name": ["Sample Point"], "lat": [LAT], "lng": [LNG],
+            "type": ["cafe"], "city": ["NOVA"], "street": ["System"],
             "source": ["Fallback"],
         })
-        return dummy_data, "Fallback Mode (Check URL)"
-
-with st.spinner("Synchronizing with NOVA Intelligence Cloud..."):
-    df_raw, source_status = load_intelligence_data()
-
-st.sidebar.info(f"Data Source: {source_status}")
+        return dummy_data, "Fallback Mode"
 
 # ================================
 # 4. RISK PROCESSING ENGINE
