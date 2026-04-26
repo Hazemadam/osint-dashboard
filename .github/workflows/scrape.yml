@@ -1,0 +1,32 @@
+name: Daily OSINT Scrape
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs every day at midnight
+  workflow_dispatch:   # Adds a "Run" button so you can start it manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pandas requests pyarrow
+
+      - name: Run Scraper
+        run: python update_data.py
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add nova_data.parquet
+          git commit -m "Auto-update: Latest NOVA Intelligence Data" || exit 0
+          git push
