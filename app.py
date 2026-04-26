@@ -42,13 +42,13 @@ def get_risk_profile(row, census_data):
     # Poverty Injection Logic
     poverty_impact = 0
     if not census_data.empty:
-        # Match by county/region string matching
-        county_match = census_data[census_data['Name'].str.contains(row.get('county', 'Fairfax'), case=False)]
-        if not county_match.empty:
-            poverty_impact = county_match['vulnerability_score'].mean()
+        # Match by region string matching
+        region_match = census_data[census_data['Name'].str.contains(row.get('county', 'Fairfax'), case=False)]
+        if not region_match.empty:
+            poverty_impact = region_match['vulnerability_score'].mean()
     
     # POWER FORMULA: (Poverty Squared / 4) + Base Weight
-    # This ensures that high poverty areas "explode" into Red
+    # Squaring the poverty makes high-risk areas stand out aggressively in Red
     total_score = base_score + ((poverty_impact ** 2) / 4)
     
     # Color Thresholds
@@ -60,7 +60,7 @@ def get_risk_profile(row, census_data):
         return 'blue', 'LOW'
 
 # ================================
-# 3. SIDEBAR CONTROLS
+# 3. SIDEBAR CONTROLS (Safety Fixed)
 # ================================
 st.sidebar.title("🔍 Intelligence Filters")
 
@@ -68,15 +68,20 @@ if not poi_df.empty:
     # Pre-calculate risk metrics for the entire dataset
     poi_df['color'], poi_df['level'] = zip(*poi_df.apply(lambda x: get_risk_profile(x, census_df), axis=1))
     
-    # Filter 1: Business Categories
+    # 1. CATEGORY FILTER
     all_types = sorted(poi_df['type'].unique().tolist())
+    
+    # Safety Check: Only use defaults that actually exist in the data to prevent crash
+    requested_defaults = ['motel', 'massage', 'nightclub', 'stripclub']
+    safe_defaults = [t for t in requested_defaults if t in all_types]
+    
     selected_types = st.sidebar.multiselect(
         "Business Categories", 
-        all_types, 
-        default=['motel', 'massage', 'nightclub', 'stripclub']
+        options=all_types, 
+        default=safe_defaults
     )
     
-    # Filter 2: Risk Priorities
+    # 2. RISK PRIORITY FILTER
     selected_risks = st.sidebar.multiselect(
         "Priority Levels", 
         ['HIGH', 'MEDIUM', 'LOW'], 
@@ -88,11 +93,12 @@ if not poi_df.empty:
     final_df = poi_df[mask]
 else:
     final_df = pd.DataFrame()
+    st.sidebar.warning("No intelligence data found.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 ### 🧭 Intelligence Key
-- 🔴 **HIGH:** Intersection of risky business & extreme poverty.
+- 🔴 **HIGH:** Critical overlap of business type & poverty.
 - 🟡 **MEDIUM:** Significant business risk or moderate poverty.
 - 🔵 **LOW:** Stable environment / Low-risk category.
 """)
@@ -105,11 +111,11 @@ st.title("🛡️ NOVA Strategic Risk Analysis")
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # Use CartoDB Dark Matter for maximum point contrast
+    # Dark mode map for high-contrast "Bullet" visibility
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
 
     if not final_df.empty:
-        # Render the bullet points
+        # Render the bullet points (limit to 1000 for browser speed)
         for r in final_df.head(1000).itertuples():
             folium.CircleMarker(
                 location=[r.lat, r.lng],
@@ -122,18 +128,18 @@ with col1:
                 popup=f"<b>{r.name}</b><br>Type: {r.type}<br>Priority: {r.level}"
             ).add_to(m)
 
-    st_folium(m, width=900, height=600, returned_objects=[])
+    st_folium(m, width=900, height=650, returned_objects=[])
 
 with col2:
-    st.metric("Total Entities Found", len(poi_df))
+    st.metric("Total Entities", len(poi_df))
     st.metric("Priority Targets", len(final_df))
     
     st.markdown("---")
-    st.subheader("⚠️ Top Priority Alerts")
-    # Show the top 8 'High' risk hits in the sidebar for quick review
-    high_priority = final_df[final_df['level'] == 'HIGH'].head(8)
+    st.subheader("⚠️ High Priority Alerts")
+    # Display top HIGH risk targets for quick scanning
+    high_priority = final_df[final_df['level'] == 'HIGH'].head(10)
     if not high_priority.empty:
         for i, row in high_priority.iterrows():
-            st.error(f"**{row['name']}**\nCategory: {row['type']}")
+            st.error(f"**{row['name']}**\n{row['type']}")
     else:
-        st.success("No High-Risk targets currently filtered.")
+        st.success("No High-Risk targets found in current view.")
