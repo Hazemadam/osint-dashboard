@@ -21,6 +21,7 @@ def fetch_data():
 
     for url in urls:
         try:
+            print(f"Attempting to fetch from {url}...")
             r = requests.post(url, data=query, timeout=25)
             r.raise_for_status()
             data = r.json()
@@ -57,17 +58,17 @@ def fetch_data():
     return pd.DataFrame(), "All APIs failed"
 
 def update_repo_data():
-    print("Starting data fetch...")
+    print("Starting data fetch sequence...")
     df, status = fetch_data()
     
     if not df.empty:
-        # This creates the file the robot will save back to GitHub
+        # This creates the file your Streamlit app is looking for
         df.to_parquet("nova_data.parquet")
-        print(f"Data updated successfully: {len(df)} points found.")
+        print(f"Update complete! Found {len(df)} locations.")
     else:
         print(f"Update failed: {status}")
-        # We raise an error so the GitHub Action knows it failed
-        raise Exception("No data collected.")
+        # Raising an error ensures the GitHub Action shows a red 'X' if it fails
+        raise Exception("No data was collected from the APIs.")
 
 if __name__ == "__main__":
     update_repo_data()
