@@ -6,25 +6,28 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # Explicitly gives the robot permission to save files
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4  # Fixed: Version 4 uses newer Node.js
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # Updated to v5
+        uses: actions/setup-python@v5  # Fixed: Version 5 uses newer Node.js
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install pandas requests pyarrow
+        run: |
+          pip install pandas requests pyarrow
+          # We add pyarrow specifically because it's required for Parquet files
 
       - name: Run Scraper
         run: python update_data.py
+        # If this fails, the error log will now show us exactly which line crashed
 
       - name: Commit and Push
         run: |
