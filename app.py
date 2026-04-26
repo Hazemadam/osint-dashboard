@@ -1,243 +1,266 @@
-import os
-import numpy as np
-import pandas as pd
 import streamlit as st
-import folium
+import pandas as pd
+import numpy as np
 import requests
+import folium
 import time
-from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-from sklearn.cluster import DBSCAN
+from folium.plugins import HeatMap
 
-# =========================================================
-# PAGE SETUP
-# =========================================================
-st.set_page_config(
-    page_title="OSINT Intelligence Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# ================================
+# CONFIG
+# ================================
+st.set_page_config(page_title="OSINT Intelligence Dashboard", layout="wide")
 
-# Constants
 LAT = 38.85
 LNG = -77.30
-CACHE_FILE = "osint_cache.csv"
-# Added mirrors to handle the timeouts seen in your screenshot
-OVERPASS_MIRRORS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter"
-]
 
-st.markdown(
+st.title("🗺️ OSINT Intelligence Dashboard")
+
+# ================================
+# SESSION STATE
+# ================================
+if "last_live_data" not in st.session_state:
+    st.session_state.last_live_data = None
+
+if "fallback_data" not in st.session_state:
+    np.random.seed(42)
+    st.session_state.fallback_data = pd.DataFrame({
+        "name": [f"Simulated Location {i}" for i in range(40)],
+        "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
+        "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
+        "type": np.random.choice(
+            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"], 40
+        ),
+        "city": "Simulated Region",
+        "street": "Simulated Area",
+        "source": "Synthetic Model",
+        "osm_type": "synthetic",
+        "osm_id": -1,
+    })
+
+# ================================
+# FETCH DATA
+# ================================
+@st.cache_data(ttl=600)
+def fetch_data():
+    query = """
+    [out:json][timeout:20];
+    (
+      nwr["tourism"~"hotel|motel"](38.6,-77.6,39.1,-77.0);
+      nwr["amenity"~"bar|nightclub|cafe|restaurant|spa"](38.6,-77.6,39.1,-77.0);
+      nwr["shop"="massage"](38.6,-77.6,39.1,-77.0);
+    );
+    out center;
     """
-    <style>
-        .block-container { padding-top: 1rem; padding-bottom: 2rem; }
-        [data-testid="stMetricValue"] { font-size: 1.8rem; }
-        .small-note { font-size: 0.86rem; opacity: 0.8; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-st.title("🧠 OSINT Intelligence Dashboard")
+    urls = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+    ]
 
-# =========================================================
-# DATA HELPERS & API CALLS
-# =========================================================
-REQUIRED_COLS = ["name", "lat", "lng", "type", "city", "street", "source"]
+    last_error = "No live response"
 
+    for url in urls:
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    url,
+                    data=query,
+                    headers={"Content-Type": "text/plain"},
+                    timeout=20,
+                )
+                r.raise_for_status()
+                data = r.json()
+
+                rows = []
+
+                for el in data.get("elements", []):
+                    tags = el.get("tags", {})
+                    lat = el.get("lat") or el.get("center", {}).get("lat")
+                    lng = el.get("lon") or el.get("center", {}).get("lon")
+
+                    if lat is None or lng is None:
+                        continue
+
+                    category = (
+                        tags.get("amenity")
+                        or tags.get("tourism")
+                        or tags.get("shop")
+                        or "unknown"
+                    )
+
+                    rows.append({
+                        "name": tags.get("name") or "Unnamed Location",
+                        "lat": lat,
+                        "lng": lng,
+                        "type": category,
+                        "city": tags.get("addr:city") or "Unknown",
+                        "street": tags.get("addr:street") or "Unknown",
+                        "source": "OpenStreetMap",
+                    })
+
+                df = pd.DataFrame(rows)
+
+                if not df.empty:
+                    return df, f"Live data from {url}"
+
+                last_error = f"{url} returned no data"
+
+            except Exception as e:
+                last_error = str(e)
+                time.sleep(1.5)
+
+    return pd.DataFrame(), last_error
+
+
+# ================================
+# LOAD DATA
+# ================================
+with st.spinner("Fetching OSINT data..."):
+    df_raw, fetch_status = fetch_data()
+
+if df_raw.empty:
+    if st.session_state.last_live_data is not None:
+        df_raw = st.session_state.last_live_data.copy()
+        data_source = "Last live dataset"
+    else:
+        df_raw = st.session_state.fallback_data.copy()
+        data_source = "Fallback dataset"
+else:
+    st.session_state.last_live_data = df_raw.copy()
+    data_source = "Live OpenStreetMap"
+
+st.sidebar.caption(f"Fetch status: {fetch_status}")
+st.caption(f"Data source: {data_source}")
+
+
+# ================================
+# RISK MODEL (OSINT PATTERN-BASED)
+# ================================
 CATEGORY_WEIGHTS = {
-    "hotel": 2.0, "motel": 2.2, "bar": 1.3, "nightclub": 1.8,
-    "restaurant": 0.8, "cafe": 0.6, "spa": 2.4, "massage": 2.6, "shop": 0.4,
+    "hotel": 2.0,
+    "motel": 2.2,
+    "nightclub": 1.8,
+    "bar": 1.3,
+    "spa": 2.4,
+    "massage": 2.6,
+    "restaurant": 0.8,
+    "cafe": 0.6,
+    "shop": 0.4,
 }
 
-def fetch_live_data(lat, lng, radius=5000):
-    """
-    Fetches real data from Overpass API. 
-    Fixes the HTTP 406 error by adding a proper User-Agent.
-    """
-    # Overpass QL query targeting categories in your CATEGORY_WEIGHTS
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node["amenity"~"bar|nightclub|restaurant|cafe|spa|massage_institute"](around:{radius},{lat},{lng});
-      node["tourism"~"hotel|motel"](around:{radius},{lat},{lng});
-      node["shop"~"massage"](around:{radius},{lat},{lng});
-    );
-    out body;
-    """
-    
-    # Headers are CRITICAL to avoid HTTP 406
-    headers = {
-        'User-Agent': 'OSINT-Dashboard-App/1.0 (https://your-website-or-contact.com)',
-        'Referer': 'https://openstreetmap.org'
-    }
+HIGH_RISK = {"hotel", "motel", "nightclub", "bar", "spa", "massage"}
 
-    for url in OVERPASS_MIRRORS:
-        try:
-            with st.spinner(f"Requesting live data from {url.split('/')[2]}..."):
-                response = requests.post(url, data={'data': query}, headers=headers, timeout=20)
-                if response.status_code == 200:
-                    data = response.json()
-                    elements = data.get('elements', [])
-                    
-                    rows = []
-                    for e in elements:
-                        tags = e.get('tags', {})
-                        rows.append({
-                            "name": tags.get('name', 'Unknown'),
-                            "lat": e.get('lat'),
-                            "lng": e.get('lon'),
-                            "type": tags.get('amenity') or tags.get('tourism') or tags.get('shop') or 'unknown',
-                            "city": tags.get('addr:city', 'Unknown'),
-                            "street": tags.get('addr:street', 'Unknown'),
-                            "source": f"Live OSM ({url.split('/')[2]})"
-                        })
-                    return pd.DataFrame(rows)
-                elif response.status_code == 429:
-                    st.warning(f"Mirror {url} is rate-limited. Trying next...")
-                else:
-                    st.error(f"Mirror {url} returned status {response.status_code}")
-        except Exception as e:
-            st.error(f"Connection to {url} failed: {e}")
-            continue
-            
-    return None
 
-def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+def compute_risk(row, df):
+    lat, lng = row["lat"], row["lng"]
+    t = str(row["type"]).lower()
+
+    risk = CATEGORY_WEIGHTS.get(t, 0.3)
+
+    # FIXED: correct boolean grouping
+    nearby = df[
+        ((df["lat"] - lat).abs() < 0.015)
+        & ((df["lng"] - lng).abs() < 0.015)
+    ]
+
+    n = len(nearby)
+
+    # density
+    risk += min(n / 8, 3.0)
+
+    types = set(nearby["type"].astype(str).str.lower())
+
+    has_hotel = any(x in types for x in ["hotel", "motel"])
+    has_night = any(x in types for x in ["bar", "nightclub"])
+    has_spa = any(x in types for x in ["spa", "massage"])
+
+    if has_hotel and has_night:
+        risk += 2.5
+    if has_hotel and has_spa:
+        risk += 1.8
+    if has_night and has_spa:
+        risk += 1.2
+
+    risk += min(sum(x in HIGH_RISK for x in types) * 0.4, 2.0)
+
+    if n < 3:
+        risk *= 0.7
+
+    return float(risk)
+
+
+# ================================
+# PROCESS
+# ================================
+def process(df):
     df = df.copy()
-    for col in REQUIRED_COLS:
-        if col not in df.columns:
-            df[col] = np.nan if col in {"lat", "lng"} else "Unknown"
+    df["type"] = df["type"].astype(str).str.lower()
 
-    df["name"] = df["name"].fillna("Unnamed Location").astype(str)
-    df["type"] = df["type"].fillna("unknown").astype(str).str.lower()
-    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-    df["lng"] = pd.to_numeric(df["lng"], errors="coerce")
-    return df.dropna(subset=["lat", "lng"]).reset_index(drop=True)
+    risks = []
+    for _, row in df.iterrows():
+        risks.append(compute_risk(row, df))
 
-def load_initial_data(uploaded_file, trigger_live=False) -> tuple[pd.DataFrame, str]:
-    # 1. Manual Upload
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            return normalize_df(df), "uploaded CSV"
-        except: pass
+    df["risk"] = risks
 
-    # 2. Live Data Request (The Fix)
-    if trigger_live:
-        live_df = fetch_live_data(LAT, LNG)
-        if live_df is not None and not live_df.empty:
-            df = normalize_df(live_df)
-            df.to_csv(CACHE_FILE, index=False)
-            return df, "Live Overpass Data"
+    def topic(t):
+        if t in {"hotel", "motel"}:
+            return "Lodging"
+        if t in {"bar", "nightclub"}:
+            return "Nightlife"
+        if t in {"spa", "massage"}:
+            return "Wellness"
+        if t in {"restaurant", "cafe"}:
+            return "Food"
+        return "Other"
 
-    # 3. Local Cache
-    if os.path.exists(CACHE_FILE):
-        try:
-            df = pd.read_csv(CACHE_FILE)
-            return normalize_df(df), "local cached dataset"
-        except: pass
+    df["topic"] = df["type"].apply(topic)
 
-    # 4. Fallback
-    return normalize_df(generate_demo_data()), "synthetic demo dataset"
-
-def generate_demo_data(n: int = 120) -> pd.DataFrame:
-    # (Existing demo function remains as emergency fallback)
-    rng = np.random.default_rng(42)
-    centers = [(LAT+0.02, LNG+0.01, ["hotel", "bar"]), (LAT-0.01, LNG-0.01, ["spa", "hotel"])]
-    rows = []
-    for i in range(n):
-        c_lat, c_lng, kinds = centers[i % len(centers)]
-        rows.append({
-            "name": f"Demo {i}", "lat": c_lat + rng.normal(0, 0.005), 
-            "lng": c_lng + rng.normal(0, 0.005), "type": rng.choice(kinds),
-            "city": "Demo City", "street": "Demo St", "source": "Synthetic"
-        })
-    return pd.DataFrame(rows)
-
-# ... (Insert build_cluster_labels, local_neighbor_counts, compute_risk_model, summarize_hotspots here)
-# [Keeping your original logic for clustering and risk scoring below]
-
-def build_cluster_labels(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    if len(df) < 3:
-        df["cluster"] = -1
-        return df
-    coords = df[["lat", "lng"]].to_numpy()
-    db = DBSCAN(eps=0.012, min_samples=3).fit(coords)
-    df["cluster"] = db.labels_
     return df
 
-def local_neighbor_counts(df: pd.DataFrame, radius: float = 0.015) -> list[int]:
-    counts = []
-    for row in df.itertuples():
-        nearby = ((df["lat"] - row.lat).abs() < radius) & ((df["lng"] - row.lng).abs() < radius)
-        counts.append(int(nearby.sum()))
-    return counts
 
-def compute_risk_model(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy().reset_index(drop=True)
-    df = build_cluster_labels(df)
-    local_counts = local_neighbor_counts(df)
-    baseline_count = float(np.median(local_counts)) if local_counts else 0.0
+df = process(df_raw)
 
-    risks, signals, confidence = [], [], []
-    for idx, row in df.iterrows():
-        t = str(row["type"]).lower()
-        base = CATEGORY_WEIGHTS.get(t, 0.3)
-        nearby_mask = ((df["lat"] - row["lat"]).abs() < 0.015) & ((df["lng"] - row["lng"]).abs() < 0.015)
-        nearby_types = set(df.loc[nearby_mask, "type"].str.lower())
-        
-        score = base + min(local_counts[idx]/10, 3.0)
-        bits = []
-        if {"hotel", "motel"} & nearby_types and {"bar", "nightclub"} & nearby_types:
-            score += 2.0; bits.append("hotel+nightlife")
-        
-        risks.append(float(score))
-        signals.append(", ".join(bits) if bits else "none")
-        confidence.append(round(min(1.0, 0.35 + 0.1 * local_counts[idx]), 2))
 
-    df["risk"], df["confidence"], df["signals"] = risks, confidence, signals
-    df["topic"] = df["type"].apply(lambda x: "Lodging" if x in ["hotel", "motel"] else "Other")
-    df["neighbor_count"] = local_counts
-    return df
+# ================================
+# FILTERS
+# ================================
+types = sorted(df["type"].unique())
 
-def summarize_hotspots(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty: return pd.DataFrame()
-    clustered = df[df["cluster"] != -1].copy()
-    res = []
-    for cid, gp in clustered.groupby("cluster"):
-        res.append({"cluster": cid, "count": len(gp), "avg_risk": round(gp["risk"].mean(), 2), 
-                    "top_type": gp["type"].mode()[0], "lat": gp["lat"].mean(), "lng": gp["lng"].mean()})
-    return pd.DataFrame(res).sort_values("avg_risk", ascending=False)
+selected = st.sidebar.multiselect("Category", types, default=types)
+min_risk = st.sidebar.slider("Minimum Risk", 0.0, 10.0, 0.0)
 
-# =========================================================
-# MAIN INTERFACE
-# =========================================================
-st.sidebar.header("🎛️ Controls")
-trigger_live = st.sidebar.button("🌐 Fetch Live Data (Overpass API)")
-uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+filtered = df[
+    (df["type"].isin(selected))
+    & (df["risk"] >= min_risk)
+]
 
-df_raw, data_source = load_initial_data(uploaded, trigger_live=trigger_live)
-df = compute_risk_model(df_raw)
+st.write("Points:", len(filtered))
 
-# ... (The rest of your filtering, metrics, and Tabs logic goes here)
-# [Keep your existing Tab code to render the Folium map and charts]
+st.dataframe(
+    filtered[["name", "type", "topic", "risk", "city", "street"]],
+    use_container_width=True,
+    hide_index=True
+)
 
-# Quick metrics
-c1, c2, c3 = st.columns(3)
-c1.metric("Total Points", len(df))
-c2.metric("Data Source", data_source)
-c3.metric("Avg Risk", f"{df['risk'].mean():.2f}" if not df.empty else 0)
 
-tab1, tab2 = st.tabs(["Map", "Data"])
-with tab1:
-    m = folium.Map(location=[LAT, LNG], zoom_start=12)
-    heat_data = [[r.lat, r.lng, r.risk] for r in df.itertuples()]
-    HeatMap(heat_data).add_to(m)
-    st_folium(m, width=900, height=500)
+# ================================
+# MAP
+# ================================
+m = folium.Map(location=[LAT, LNG], zoom_start=11)
 
-with tab2:
-    st.dataframe(df)
+if not filtered.empty:
+    heat = [[r.lat, r.lng, r.risk] for r in filtered.itertuples()]
+    HeatMap(heat, radius=18).add_to(m)
+
+    for r in filtered.itertuples():
+        folium.CircleMarker(
+            location=[r.lat, r.lng],
+            radius=5,
+            popup=f"{r.name} | {r.type} | Risk {r.risk:.2f}",
+            fill=True,
+            fill_opacity=0.7,
+        ).add_to(m)
+
+st_folium(m, width=1200, height=700)
