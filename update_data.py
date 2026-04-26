@@ -3,7 +3,7 @@ import requests
 import time
 
 def fetch_data():
-    # The instructions for the OpenStreetMap scraper
+    # Instructions for the OpenStreetMap scraper
     query = """
     [out:json][timeout:30];
     (
@@ -21,7 +21,7 @@ def fetch_data():
 
     for url in urls:
         try:
-            print(f"Attempting to fetch from {url}...")
+            print(f"Connecting to {url}...")
             r = requests.post(url, data=query, timeout=25)
             r.raise_for_status()
             data = r.json()
@@ -49,26 +49,25 @@ def fetch_data():
 
             df = pd.DataFrame(rows)
             if not df.empty:
-                return df, f"Success from {url}"
+                return df, "Success"
 
         except Exception as e:
-            print(f"Failed to fetch from {url}: {e}")
+            print(f"Server {url} busy or failed: {e}")
             continue
 
     return pd.DataFrame(), "All APIs failed"
 
 def update_repo_data():
-    print("Starting data fetch sequence...")
+    print("Robot starting scrape...")
     df, status = fetch_data()
     
     if not df.empty:
-        # This creates the file your Streamlit app is looking for
+        # Saving the file that Streamlit is looking for
         df.to_parquet("nova_data.parquet")
-        print(f"Update complete! Found {len(df)} locations.")
+        print(f"Success! Found {len(df)} locations in NOVA.")
     else:
-        print(f"Update failed: {status}")
-        # Raising an error ensures the GitHub Action shows a red 'X' if it fails
-        raise Exception("No data was collected from the APIs.")
+        print(f"Error: {status}")
+        raise Exception("The scrape failed to find any data.")
 
 if __name__ == "__main__":
     update_repo_data()
