@@ -1,38 +1,43 @@
-name: Daily OSINT Scrape
+name: Daily OSINT & Census Scrape
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *'  # Runs every night at midnight
+  workflow_dispatch:      # Allows you to run it manually
 
 permissions:
-  contents: write
+  contents: write         # Allows the robot to save the .parquet files
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # Fixed: Version 4 uses newer Node.js
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # Fixed: Version 5 uses newer Node.js
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          pip install pandas requests pyarrow
-          # We add pyarrow specifically because it's required for Parquet files
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # This line tells the robot to look at your requirements.txt 
+          # and install pandas, requests, census, and us.
 
       - name: Run Scraper
         run: python update_data.py
-        # If this fails, the error log will now show us exactly which line crashed
+        env:
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }} 
+          # If you want to be extra secure, you can put your key in GitHub Secrets,
+          # but since we hardcoded it in update_data.py for now, this is fine.
 
       - name: Commit and Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add nova_data.parquet
-          git commit -m "Auto-update: Latest NOVA Intelligence Data" || exit 0
+          git add nova_data.parquet vulnerability_data.parquet
+          git commit -m "Auto-update: Intelligence & Vulnerability Data" || exit 0
           git push
