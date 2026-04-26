@@ -1,7 +1,6 @@
 streamlit
-folium
 pandas
-numpy
+pyarrow
 scikit-learn
-requests
+folium
 streamlit-folium
