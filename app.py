@@ -1,46 +1,25 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import folium
-import time
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap
 from sklearn.cluster import DBSCAN
 
 # ================================
-# CONFIG
+# 1. CONFIGURATION
 # ================================
-st.set_page_config(page_title="OSINT Intelligence Dashboard", layout="wide")
+st.set_page_config(page_title="NOVA OSINT Intelligence", layout="wide")
 
+# Center point for Northern Virginia (Fairfax/Centreville area)
 LAT = 38.85
 LNG = -77.30
 
-st.title("🗺️ OSINT Intelligence Dashboard")
+st.title("🗺️ NOVA OSINT Intelligence Dashboard")
+st.markdown("---")
 
 # ================================
-# SESSION STATE (fallback safety)
-# ================================
-if "last_live_data" not in st.session_state:
-    st.session_state.last_live_data = None
-
-if "fallback_data" not in st.session_state:
-    np.random.seed(42)
-    st.session_state.fallback_data = pd.DataFrame({
-        "name": [f"Simulated Location {i}" for i in range(40)],
-        "lat": LAT + np.random.uniform(-0.08, 0.08, 40),
-        "lng": LNG + np.random.uniform(-0.08, 0.08, 40),
-        "type": np.random.choice(
-            ["hotel", "motel", "bar", "nightclub", "cafe", "restaurant", "spa", "massage"],
-            40
-        ),
-        "city": "Simulated Region",
-        "street": "Simulated Area",
-        "source": "Synthetic Model",
-    })
-
-# ================================
-# CATEGORY BASE RISK
+# 2. RISK WEIGHTS & CONSTANTS
 # ================================
 BASE_WEIGHTS = {
     "hotel": 2.0,
@@ -54,89 +33,51 @@ BASE_WEIGHTS = {
 }
 
 # ================================
-# FETCH DATA (your original logic)
+# 3. DATA LOADING (GITHUB CLOUD)
 # ================================
-@st.cache_data(ttl=600)
-def fetch_data():
-    query = """
-    [out:json][timeout:20];
-    (
-      nwr["tourism"~"hotel|motel"](38.6,-77.6,39.1,-77.0);
-      nwr["amenity"~"bar|nightclub|cafe|restaurant|spa"](38.6,-77.6,39.1,-77.0);
-      nwr["shop"="massage"](38.6,-77.6,39.1,-77.0);
-    );
-    out center;
+@st.cache_data(ttl=3600)  # Re-checks for new data every hour
+def load_intelligence_data():
     """
+    Reads the pre-scraped parquet file from your GitHub repository.
+    This prevents API crashes and rate-limiting.
+    """
+    # TODO: REPLACE THESE WITH YOUR ACTUAL GITHUB INFO
+    USER = "YOUR_GITHUB_USERNAME"
+    REPO = "YOUR_REPO_NAME"
+    FILENAME = "nova_data.parquet" 
+    
+    URL = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/{FILENAME}"
+    
+    try:
+        # Streamlit reads the parquet file directly into a dataframe
+        df = pd.read_parquet(URL)
+        return df, "Live GitHub Cloud Storage"
+    except Exception as e:
+        # Fallback if the file isn't found or hasn't been created yet
+        st.error(f"Could not load cloud data: {e}")
+        dummy_data = pd.DataFrame({
+            "name": ["Sample Point (Check GitHub Action)"],
+            "lat": [LAT],
+            "lng": [LNG],
+            "type": ["cafe"],
+            "city": ["NOVA"],
+            "street": ["System"],
+            "source": ["Fallback"],
+        })
+        return dummy_data, "Fallback Mode (Check URL)"
 
-    urls = [
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass-api.de/api/interpreter",
-    ]
+with st.spinner("Synchronizing with NOVA Intelligence Cloud..."):
+    df_raw, source_status = load_intelligence_data()
 
-    for url in urls:
-        try:
-            r = requests.post(url, data=query, timeout=15)
-            data = r.json()
-
-            rows = []
-            for el in data.get("elements", []):
-                tags = el.get("tags", {})
-
-                lat = el.get("lat") or el.get("center", {}).get("lat")
-                lng = el.get("lon") or el.get("center", {}).get("lon")
-
-                if lat is None or lng is None:
-                    continue
-
-                category = tags.get("amenity") or tags.get("tourism") or tags.get("shop") or "unknown"
-
-                rows.append({
-                    "name": tags.get("name", "Unnamed"),
-                    "lat": lat,
-                    "lng": lng,
-                    "type": category,
-                    "city": tags.get("addr:city", "Unknown"),
-                    "street": tags.get("addr:street", "Unknown"),
-                    "source": "OpenStreetMap",
-                })
-
-            df = pd.DataFrame(rows)
-
-            if not df.empty:
-                return df, f"Live data from {url}"
-
-        except Exception:
-            continue
-
-    return pd.DataFrame(), "fallback"
+st.sidebar.info(f"Data Source: {source_status}")
 
 # ================================
-# LOAD
+# 4. RISK PROCESSING ENGINE
 # ================================
-with st.spinner("Fetching OSINT data..."):
-    df_raw, status = fetch_data()
-
-if df_raw.empty:
-    if st.session_state.last_live_data is not None:
-        df_raw = st.session_state.last_live_data.copy()
-        source = "Last Live Data"
-    else:
-        df_raw = st.session_state.fallback_data.copy()
-        source = "Fallback Data"
-else:
-    st.session_state.last_live_data = df_raw.copy()
-    source = "Live OSM Data"
-
-st.sidebar.caption(f"Status: {status}")
-st.caption(f"Source: {source}")
-
-# ================================
-# PROCESS (SAFE RISK MODEL)
-# ================================
-def process(df):
+def process_risk_model(df):
     df = df.copy()
 
-    # clustering
+    # Clustering (DBSCAN) - Groups points that are physically close
     if len(df) > 3:
         coords = df[["lat", "lng"]].to_numpy()
         db = DBSCAN(eps=0.01, min_samples=3).fit(coords)
@@ -147,69 +88,95 @@ def process(df):
     risks = []
 
     for i, row in df.iterrows():
-        lat = row["lat"]
-        lng = row["lng"]
-        t = str(row["type"]).lower()
+        lat, lng = row["lat"], row["lng"]
+        category = str(row["type"]).lower()
 
-        base = BASE_WEIGHTS.get(t, 0.5)
+        # Calculation 1: Base Weight
+        base = BASE_WEIGHTS.get(category, 0.5)
 
+        # Calculation 2: Local Density (Points within approx 1.5km)
         nearby = df[
             ((df["lat"] - lat).abs() < 0.015) &
             ((df["lng"] - lng).abs() < 0.015)
         ]
+        density_score = min(len(nearby) / 10, 3)
 
-        density = min(len(nearby) / 10, 3)
+        # Calculation 3: High-Risk Combinations (Synergy)
+        types_nearby = set(nearby["type"].astype(str).str.lower())
+        combo_score = 0
+        if {"hotel", "motel"} & types_nearby and {"bar", "nightclub"} & types_nearby:
+            combo_score += 2.0
+        if {"hotel", "motel"} & types_nearby and {"spa", "massage"} & types_nearby:
+            combo_score += 1.5
 
-        types = set(nearby["type"].astype(str).str.lower())
-
-        combo = 0
-        if {"hotel", "motel"} & types and {"bar", "nightclub"} & types:
-            combo += 2.0
-        if {"hotel", "motel"} & types and {"spa", "massage"} & types:
-            combo += 1.5
-
+        # Calculation 4: Cluster Bonus
         cluster_bonus = 0
         if row["cluster"] != -1:
             cluster_size = (df["cluster"] == row["cluster"]).sum()
             cluster_bonus = min(cluster_size * 0.2, 2)
 
-        risk = base + density + combo + cluster_bonus
-        risks.append(risk)
+        # Final Score
+        total_risk = base + density_score + combo_score + cluster_bonus
+        risks.append(total_risk)
 
     df["risk"] = risks
     return df
 
-df = process(df_raw)
+processed_df = process_risk_model(df_raw)
 
 # ================================
-# FILTERS
+# 5. SIDEBAR FILTERS
 # ================================
-types = sorted(df["type"].unique())
+all_types = sorted(processed_df["type"].unique())
+selected_categories = st.sidebar.multiselect("Filter Categories", all_types, default=all_types)
+min_risk_threshold = st.sidebar.slider("Risk Severity Threshold", 0.0, 10.0, 2.0)
 
-selected = st.sidebar.multiselect("Category", types, default=types)
-min_risk = st.sidebar.slider("Min Risk", 0.0, 10.0, 0.0)
-
-filtered = df[
-    (df["type"].isin(selected)) &
-    (df["risk"] >= min_risk)
+filtered_df = processed_df[
+    (processed_df["type"].isin(selected_categories)) &
+    (processed_df["risk"] >= min_risk_threshold)
 ]
 
-st.write("Points:", len(filtered))
+# ================================
+# 6. DASHBOARD VISUALS
+# ================================
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    st.subheader("Intelligence Heatmap")
+    m = folium.Map(location=[LAT, LNG], zoom_start=11, tiles="cartodbpositron")
+
+    if not filtered_df.empty:
+        # Create Heatmap Layer
+        heat_data = [[r.lat, r.lng, r.risk] for r in filtered_df.itertuples()]
+        HeatMap(heat_data, radius=15, blur=10).add_to(m)
+
+        # Add Individual Markers
+        for r in filtered_df.itertuples():
+            # Color coding markers by risk
+            color = "red" if r.risk > 5 else "orange" if r.risk > 3 else "blue"
+            folium.CircleMarker(
+                location=[r.lat, r.lng],
+                radius=6,
+                popup=f"<b>{r.name}</b><br>Type: {r.type}<br>Risk Score: {round(r.risk, 2)}",
+                color=color,
+                fill=True,
+                fill_opacity=0.7
+            ).add_to(m)
+
+    st_folium(m, width=1000, height=600)
+
+with col2:
+    st.subheader("High Risk Points")
+    st.metric("Identified Points", len(filtered_df))
+    
+    # Display the top 10 riskiest locations
+    top_risks = filtered_df.sort_values(by="risk", ascending=False).head(10)
+    for i, row in top_risks.iterrows():
+        st.write(f"⚠️ **{row['name']}**")
+        st.caption(f"Score: {round(row['risk'], 2)} | {row['type']}")
 
 # ================================
-# MAP
+# 7. RAW DATA VIEW
 # ================================
-m = folium.Map(location=[LAT, LNG], zoom_start=11)
-
-if not filtered.empty:
-    HeatMap([[r.lat, r.lng, r.risk] for r in filtered.itertuples()], radius=18).add_to(m)
-
-    for r in filtered.itertuples():
-        folium.CircleMarker(
-            location=[r.lat, r.lng],
-            radius=5,
-            popup=f"{r.name} | Risk {round(r.risk,2)}",
-            fill=True,
-        ).add_to(m)
-
-st_folium(m, width=1200, height=700)
+with st.expander("View Full Intelligence Table"):
+    st.dataframe(filtered_df, use_container_width=True)
