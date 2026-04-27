@@ -24,44 +24,46 @@ def load_data():
 poi_df, census_df = load_data()
 
 # ================================
-# 2. THE RISK ENGINE (Static Thresholds)
+# 2. THE RISK ENGINE (Standardized Scoring)
 # ================================
-def apply_static_scoring(df, census):
+def apply_standardized_scoring(df, census):
     if df.empty:
         return df
     
-    # Base risk by business category (Scale of 1-10)
+    # Business weights
     weights = {
         'stripclub': 10, 'massage': 9, 'nightclub': 8, 
         'motel': 7, 'spa': 5, 'bar': 4, 'hotel': 2
     }
     
-    results = []
+    raw_scores = []
     for _, row in df.iterrows():
         base = weights.get(row['type'].lower(), 1)
-        
-        # Poverty Score (Usually 0.0 to 1.0)
         poverty = 0
         if not census.empty:
             match = census[census['Name'].str.contains(row.get('county', 'Fairfax'), case=False)]
             poverty = match['vulnerability_score'].mean() if not match.empty else 0
         
-        # FINAL SCORE: Base Business + (Poverty * 10)
-        # Potential range: 1 to 20
-        total_score = base + (poverty * 10)
-        
-        # STATIC COLOR LOGIC (Hard numbers, no percentiles)
-        if total_score >= 15:
-            color, level = 'red', 'HIGH'
-        elif total_score >= 8:
-            color, level = 'orange', 'MEDIUM'
-        else:
-            color, level = 'blue', 'LOW'
-            
-        results.append({'color': color, 'level': level, 'raw_score': total_score})
+        # Initial score combining the two
+        raw_scores.append(base + (poverty * 5))
     
-    res_df = pd.concat([df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
-    return res_df
+    df['raw_score'] = raw_scores
+    
+    # --- DYNAMIC BALANCING ---
+    # We find the mean and standard deviation of YOUR data
+    avg = np.mean(raw_scores)
+    std = np.std(raw_scores)
+    
+    def get_color_label(s):
+        # HIGH: More than 1 standard deviation above average
+        if s > (avg + std): return 'red', 'HIGH'
+        # MEDIUM: Above average
+        if s > avg: return 'orange', 'MEDIUM'
+        # LOW: Below average
+        return 'blue', 'LOW'
+    
+    df['color'], df['level'] = zip(*df['raw_score'].apply(get_color_label))
+    return df
 
 # ================================
 # 3. SIDEBAR & FILTERS
@@ -69,25 +71,25 @@ def apply_static_scoring(df, census):
 st.sidebar.title("🔍 Intelligence Filter")
 
 if not poi_df.empty:
-    # 1. CATEGORY FILTER (Must happen before scoring to be fast)
+    # 1. CATEGORY FILTER
     all_types = sorted(poi_df['type'].unique().tolist())
     requested_defaults = ['motel', 'massage', 'nightclub', 'stripclub']
     safe_defaults = [t for t in requested_defaults if t in all_types]
     
     selected_types = st.sidebar.multiselect("Business Category", all_types, default=safe_defaults)
     
-    # Filter by type
+    # Filter by type first
     filtered_df = poi_df[poi_df['type'].isin(selected_types)].copy()
     
-    # 2. APPLY SCORING
-    scored_df = apply_static_scoring(filtered_df, census_df)
+    # 2. APPLY BALANCED SCORING
+    scored_df = apply_standardized_scoring(filtered_df, census_df)
     
     # 3. RISK LEVEL FILTER
     selected_risks = st.sidebar.multiselect("Risk Level", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW'])
     
     final_df = scored_df[scored_df['level'].isin(selected_risks)]
     
-    # Unique key for map refreshing
+    # Map ID to force refresh
     map_id = f"map_{hash(tuple(selected_types))}_{hash(tuple(selected_risks))}"
 else:
     final_df = pd.DataFrame()
@@ -95,10 +97,10 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-**Legend (Static):**
-- 🔴 **HIGH:** Score 15-20 (Critical)
-- 🟡 **MEDIUM:** Score 8-14 (Elevated)
-- 🔵 **LOW:** Score 1-7 (Standard)
+**Risk Logic (Standardized):**
+- 🔴 **HIGH:** Significantly above average risk.
+- 🟡 **MEDIUM:** Above neighborhood average.
+- 🔵 **LOW:** Below neighborhood average.
 """)
 
 # ================================
@@ -124,14 +126,14 @@ with col1:
     st_folium(m, width=900, height=650, key=map_id, returned_objects=[])
 
 with col2:
-    st.metric("Visible Targets", len(final_df))
+    st.metric("Total Points Scored", len(scored_df) if not scored_df.empty else 0)
+    st.metric("Visible on Map", len(final_df))
     st.markdown("---")
-    st.subheader("⚠️ Priority Alerts")
+    st.subheader("⚠️ High Priority Alerts")
     
-    # Display the actual High Risk hits
     alerts = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(10)
     if not alerts.empty:
         for _, row in alerts.iterrows():
             st.error(f"**{row['name']}**\nScore: {round(row['raw_score'], 1)}")
     else:
-        st.info("No targets meet 'HIGH' risk criteria (Score 15+).")
+        st.info("No 'HIGH' outliers in the current selection.")
