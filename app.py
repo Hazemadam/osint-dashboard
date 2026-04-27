@@ -18,26 +18,41 @@ def load_and_process_data():
     try:
         # Load business locations
         poi = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/nova_data.parquet")
-        # Load census vulnerability (Must have lat/long or geometry to work)
+        # Load census vulnerability
         census = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/vulnerability_data.parquet")
         
+        # --- COLUMN REPAIR LOGIC ---
+        def repair_columns(df):
+            # Convert all column names to lowercase for easier matching
+            df.columns = [c.lower() for c in df.columns]
+            # Rename variations of longitude/latitude
+            rename_map = {
+                'longitude': 'lng', 'lon': 'lng', 'long': 'lng',
+                'latitude': 'lat'
+            }
+            return df.rename(columns=rename_map)
+
+        poi = repair_columns(poi)
+        census = repair_columns(census)
+
         # --- SPATIAL CONVERSION ---
         # Convert businesses to a GeoDataFrame (Points)
         gdf_poi = gpd.GeoDataFrame(
             poi, geometry=gpd.points_from_xy(poi.lng, poi.lat), crs="EPSG:4326"
         )
         
-        # Convert census to a GeoDataFrame (Assuming census has geometry or center points)
-        # If your census file only has center points, we create 'Buffer' circles to act as neighborhoods
+        # Convert census to a GeoDataFrame
         gdf_census = gpd.GeoDataFrame(
             census, geometry=gpd.points_from_xy(census.lng, census.lat), crs="EPSG:4326"
         )
+        
         # Create 1km 'Neighborhood' zones around each census point
-        gdf_census.geometry = gdf_census.geometry.buffer(0.01) # Approx 1km radius
+        # Using a small buffer for lat/long coordinates
+        gdf_census.geometry = gdf_census.geometry.buffer(0.01) 
         
         return gdf_poi, gdf_census
     except Exception as e:
-        st.error(f"Spatial Error: {e}")
+        st.error(f"Data Repair Error: {e}")
         return gpd.GeoDataFrame(), gpd.GeoDataFrame()
 
 poi_gdf, census_gdf = load_and_process_data()
@@ -50,17 +65,17 @@ def apply_spatial_risk(poi_gdf, census_gdf):
         return poi_gdf
 
     # --- THE SPATIAL JOIN ---
-    # This 'joins' the poverty score to the business based on physical location
+    # Links vulnerability_score to the business based on being 'within' the neighborhood buffer
     joined = gpd.sjoin(poi_gdf, census_gdf[['vulnerability_score', 'geometry']], how='left', predicate='within')
     
     # Business weights
     weights = {'stripclub': 12, 'massage': 10, 'nightclub': 9, 'motel': 8, 'spa': 5, 'bar': 4, 'hotel': 2}
     
-    # Calculate Risk
+    # Clean up and calculate risk
     joined['vulnerability_score'] = joined['vulnerability_score'].fillna(joined['vulnerability_score'].mean())
-    joined['raw_score'] = joined.apply(lambda x: weights.get(x['type'].lower(), 1) + (x['vulnerability_score'] * 8), axis=1)
+    joined['raw_score'] = joined.apply(lambda x: weights.get(str(x['type']).lower(), 1) + (x['vulnerability_score'] * 8), axis=1)
     
-    # Standardized Balancing
+    # Standardized Balancing to ensure Red/Orange/Blue split
     avg = joined['raw_score'].mean()
     std = joined['raw_score'].std()
     
@@ -78,12 +93,13 @@ def apply_spatial_risk(poi_gdf, census_gdf):
 st.sidebar.title("🔍 Spatial OSINT Filter")
 
 if not poi_gdf.empty:
-    # Perform the Spatial Join
     scored_gdf = apply_spatial_risk(poi_gdf, census_gdf)
     
-    # Filter Controls
     all_types = sorted(scored_gdf['type'].unique().tolist())
-    selected_types = st.sidebar.multiselect("Business Category", all_types, default=['motel', 'massage', 'nightclub'])
+    requested_defaults = ['motel', 'massage', 'nightclub']
+    safe_defaults = [t for t in requested_defaults if t in all_types]
+    
+    selected_types = st.sidebar.multiselect("Business Category", all_types, default=safe_defaults)
     selected_risks = st.sidebar.multiselect("Priority Level", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM'])
     
     final_df = scored_gdf[(scored_gdf['type'].isin(selected_types)) & (scored_gdf['level'].isin(selected_risks))]
@@ -108,7 +124,7 @@ with col1:
                 location=[r.lat, r.lng],
                 radius=6, color='white', weight=0.5,
                 fill=True, fill_color=r.color, fill_opacity=1,
-                popup=f"<b>{r.name}</b><br>Neighborhood Risk: {round(r.vulnerability_score, 2)}"
+                popup=f"<b>{r.name}</b><br>Risk: {r.level}<br>Score: {round(r.raw_score, 1)}"
             ).add_to(m)
             
     st_folium(m, width=900, height=650, key=map_id)
@@ -119,6 +135,7 @@ with col2:
     st.markdown("---")
     st.subheader("⚠️ High-Risk Localities")
     
-    high_hits = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(10)
-    for _, row in high_hits.iterrows():
-        st.error(f"**{row['name']}**\nPrecision Score: {round(row['raw_score'], 1)}")
+    if not final_df.empty:
+        high_hits = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(10)
+        for _, row in high_hits.iterrows():
+            st.error(f"**{row['name']}**\nPrecision Score: {round(row['raw_score'], 1)}")
