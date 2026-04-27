@@ -24,41 +24,44 @@ def load_data():
 poi_df, census_df = load_data()
 
 # ================================
-# 2. THE RISK ENGINE (Relative Scaling)
+# 2. THE RISK ENGINE (Static Thresholds)
 # ================================
-def apply_relative_scoring(df, census):
+def apply_static_scoring(df, census):
     if df.empty:
         return df
     
-    # Base risk by category
-    weights = {'stripclub': 10, 'massage': 9, 'nightclub': 8, 'motel': 7, 'spa': 5, 'bar': 4, 'hotel': 2}
+    # Base risk by business category (Scale of 1-10)
+    weights = {
+        'stripclub': 10, 'massage': 9, 'nightclub': 8, 
+        'motel': 7, 'spa': 5, 'bar': 4, 'hotel': 2
+    }
     
-    # 1. Calculate raw scores
-    raw_scores = []
+    results = []
     for _, row in df.iterrows():
         base = weights.get(row['type'].lower(), 1)
+        
+        # Poverty Score (Usually 0.0 to 1.0)
         poverty = 0
         if not census.empty:
             match = census[census['Name'].str.contains(row.get('county', 'Fairfax'), case=False)]
             poverty = match['vulnerability_score'].mean() if not match.empty else 0
         
-        # We use a multiplier to make poverty scores (0.1 - 0.9) more impactful
-        raw_scores.append(base + (poverty * 10))
+        # FINAL SCORE: Base Business + (Poverty * 10)
+        # Potential range: 1 to 20
+        total_score = base + (poverty * 10)
+        
+        # STATIC COLOR LOGIC (Hard numbers, no percentiles)
+        if total_score >= 15:
+            color, level = 'red', 'HIGH'
+        elif total_score >= 8:
+            color, level = 'orange', 'MEDIUM'
+        else:
+            color, level = 'blue', 'LOW'
+            
+        results.append({'color': color, 'level': level, 'raw_score': total_score})
     
-    df['raw_score'] = raw_scores
-    
-    # 2. Determine Thresholds based on YOUR actual data range
-    # This guarantees a mix of colors regardless of the raw values
-    high_threshold = np.percentile(raw_scores, 90)  # Top 10%
-    medium_threshold = np.percentile(raw_scores, 40) # Next 50%
-    
-    def get_color_label(s):
-        if s >= high_threshold: return 'red', 'HIGH'
-        if s >= medium_threshold: return 'orange', 'MEDIUM'
-        return 'blue', 'LOW'
-    
-    df['color'], df['level'] = zip(*df['raw_score'].apply(get_color_label))
-    return df
+    res_df = pd.concat([df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
+    return res_df
 
 # ================================
 # 3. SIDEBAR & FILTERS
@@ -66,24 +69,25 @@ def apply_relative_scoring(df, census):
 st.sidebar.title("🔍 Intelligence Filter")
 
 if not poi_df.empty:
-    # Initial dynamic scoring
-    scored_df = apply_relative_scoring(poi_df, census_df)
-    
-    # Category Filter
-    all_types = sorted(scored_df['type'].unique().tolist())
+    # 1. CATEGORY FILTER (Must happen before scoring to be fast)
+    all_types = sorted(poi_df['type'].unique().tolist())
     requested_defaults = ['motel', 'massage', 'nightclub', 'stripclub']
     safe_defaults = [t for t in requested_defaults if t in all_types]
     
     selected_types = st.sidebar.multiselect("Business Category", all_types, default=safe_defaults)
     
-    # Risk Priority Filter
+    # Filter by type
+    filtered_df = poi_df[poi_df['type'].isin(selected_types)].copy()
+    
+    # 2. APPLY SCORING
+    scored_df = apply_static_scoring(filtered_df, census_df)
+    
+    # 3. RISK LEVEL FILTER
     selected_risks = st.sidebar.multiselect("Risk Level", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW'])
     
-    # APPLY FILTERS
-    final_df = scored_df[(scored_df['type'].isin(selected_types)) & (scored_df['level'].isin(selected_risks))]
+    final_df = scored_df[scored_df['level'].isin(selected_risks)]
     
-    # KEY FIX: Generate a unique ID for the map based on filter choices
-    # This forces the map to refresh every time you change a filter
+    # Unique key for map refreshing
     map_id = f"map_{hash(tuple(selected_types))}_{hash(tuple(selected_risks))}"
 else:
     final_df = pd.DataFrame()
@@ -91,10 +95,10 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-**Legend:**
-- 🔴 **HIGH:** Top 10% Priority Targets
-- 🟡 **MEDIUM:** Moderate Elevation
-- 🔵 **LOW:** Standard Monitoring
+**Legend (Static):**
+- 🔴 **HIGH:** Score 15-20 (Critical)
+- 🟡 **MEDIUM:** Score 8-14 (Elevated)
+- 🔵 **LOW:** Score 1-7 (Standard)
 """)
 
 # ================================
@@ -105,7 +109,6 @@ st.title("🛡️ NOVA Strategic Risk Analysis")
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # Use dark mode for visibility of high-priority red points
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
 
     if not final_df.empty:
@@ -115,22 +118,20 @@ with col1:
                 radius=6,
                 color='white', weight=0.5,
                 fill=True, fill_color=r.color, fill_opacity=1,
-                popup=f"<b>{r.name}</b><br>Type: {r.type}<br>Risk: {r.level}"
+                popup=f"<b>{r.name}</b><br>Risk: {r.level}<br>Score: {round(r.raw_score, 1)}"
             ).add_to(m)
 
-    # Adding the unique key=map_id fixes the update issue
     st_folium(m, width=900, height=650, key=map_id, returned_objects=[])
 
 with col2:
-    st.metric("Intelligence Points", len(poi_df))
     st.metric("Visible Targets", len(final_df))
     st.markdown("---")
     st.subheader("⚠️ Priority Alerts")
     
-    # Show only High risk targets in the alert list
-    alerts = final_df[final_df['level'] == 'HIGH'].head(10)
+    # Display the actual High Risk hits
+    alerts = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(10)
     if not alerts.empty:
         for _, row in alerts.iterrows():
-            st.error(f"**{row['name']}**\n{row['type']}")
+            st.error(f"**{row['name']}**\nScore: {round(row['raw_score'], 1)}")
     else:
-        st.info("Adjust filters to reveal High Priority targets.")
+        st.info("No targets meet 'HIGH' risk criteria (Score 15+).")
