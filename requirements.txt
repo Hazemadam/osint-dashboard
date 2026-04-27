@@ -6,3 +6,5 @@ folium
 streamlit-folium
 census
 us
+geopandas
+shapely
