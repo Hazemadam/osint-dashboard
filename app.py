@@ -7,7 +7,7 @@ from streamlit_folium import st_folium
 # ==========================================
 # 1. INITIAL SETUP & "SAFETY NET" DEFAULTS
 # ==========================================
-st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
+st.set_page_config (page_title="NOVA Strategic Intelligence", layout="wide")
 
 # Pre-define all variables to prevent any 'NameError'
 fbi_status = "Initializing..."
