@@ -38,6 +38,7 @@ def apply_global_risk(poi, census):
         return poi
     
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
+    # Strategic Weights: Higher numbers = Higher inherent risk
     weights = {'stripclub': 12, 'massage': 10, 'nightclub': 9, 'motel': 8, 'spa': 5, 'bar': 4}
     
     scores = []
@@ -45,6 +46,7 @@ def apply_global_risk(poi, census):
         base = weights.get(str(row['type']).lower(), 1)
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
         vulnerability = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0)
+        # Final Score = Business Type + (Local Poverty/Stress * 10)
         scores.append(base + (vulnerability * 10))
     
     poi['raw_score'] = scores
@@ -55,15 +57,19 @@ def apply_global_risk(poi, census):
         if s > avg: return 'orange', 'MEDIUM'
         return 'blue', 'LOW'
     
-    poi['color'], poi['level'] = zip(*poi['raw_score'].apply(get_risk_meta))
+    poi['color'], poi['level'] = zip(*poi['raw_score'].apply(get_meta_logic))
     return poi
+
+def get_meta_logic(s):
+    # Helper to avoid scope issues
+    return ('red', 'HIGH') if s > 15 else (('orange', 'MEDIUM') if s > 8 else ('blue', 'LOW'))
 
 # ================================
 # 3. SIDEBAR & SURGICAL FILTERS
 # ================================
 st.sidebar.title("🛡️ NOVA OSINT Control")
 
-# Your Secret Key
+# API Key
 api_key = st.sidebar.text_input("SerpApi Key", value="e8620ecba88a6a45350306e642ce3b86db601631dba000d19d23d4cd7c7c4550", type="password")
 
 if not poi_df.empty:
@@ -76,15 +82,11 @@ if not poi_df.empty:
     
     final_df = scored_df[(scored_df['type'].isin(s_types)) & (scored_df['level'].isin(s_risks))]
 
-    # --- DEEP SCANNER KEYWORDS ---
+    # --- THE SURGICAL FLAG LIST ---
     flags = [
-        # Worker Distress
         'tired', 'confused', 'exhausted', 'sleeping', 'scared', 'nervous', 'dont know', 'living there',
-        # Odd Timing/Access
         'after hours', 'private party', 'late night', 'buzzer', 'back door', 'locked', 'window covered',
-        # Law Enforcement
         'police', 'raid', 'undercover', 'illegal', 'sketchy', 'trap', 'assault', 'dangerous', 'arrest',
-        # Coded Language
         'cash only', 'no receipt', 'extra', 'special', 'full service', 'forced', 'security guard'
     ]
 
@@ -95,31 +97,42 @@ if not poi_df.empty:
         
         if st.sidebar.button("Run OSINT Review Scan"):
             with st.spinner(f"Interrogating Google for {target}..."):
-                # Search for ID
+                # Phase 1: ID Discovery
                 search = GoogleSearch({"engine": "google_maps", "q": f"{target} Northern Virginia", "api_key": api_key})
                 res = search.get_dict()
                 d_id = res.get("local_results", [{}])[0].get("data_id")
                 
                 if d_id:
-                    # Get Reviews
+                    # Phase 2: Review Extraction
                     rev_search = GoogleSearch({"engine": "google_maps_reviews", "data_id": d_id, "api_key": api_key})
                     reviews = rev_search.get_dict().get("reviews", [])
-                    found = [f"Found: '{f}'" for r in reviews for f in flags if f in r.get("snippet", "").lower()]
+                    found = [f for r in reviews for f in flags if f in r.get("snippet", "").lower()]
                     
                     if found:
+                        st.session_state['last_scan_found'] = list(set(found))
+                        st.session_state['last_scan_target'] = target
+                        
                         st.sidebar.error(f"🚩 {len(set(found))} RED FLAGS DETECTED")
-                        # High-Priority Logic
+                        # High-Priority Critical Alert
                         critical = ['police', 'raid', 'scared', 'forced', 'arrest', 'locked']
                         if any(c in str(found) for c in critical):
-                            st.sidebar.warning("🚨 CRITICAL: Immediate indicators of duress or law enforcement presence found.")
-                        for f in set(found): st.sidebar.write(f"- {f}")
+                            st.sidebar.warning("🚨 CRITICAL INDICATOR FOUND")
+                        for f in set(found): st.sidebar.write(f"- Found: '{f}'")
                     else:
                         st.sidebar.success("Clear: No indicators found in recent reviews.")
+                        st.session_state['last_scan_found'] = None
                 else:
                     st.sidebar.warning("Could not find a digital ID for this target.")
 
+        # --- THE NEW DOSSIER GENERATOR ---
+        if st.session_state.get('last_scan_found') and st.session_state.get('last_scan_target') == target:
+            st.sidebar.markdown("---")
+            if st.sidebar.button("📋 Create Target Dossier"):
+                st.sidebar.info("Generating Dossier below map...")
+                st.session_state['show_dossier'] = True
+
 # ================================
-# 4. MAIN DASHBOARD & PRIORITY LIST
+# 4. MAIN DASHBOARD DISPLAY
 # ================================
 st.title("🛡️ NOVA Strategic Risk Dashboard")
 c1, c2 = st.columns([3, 1])
@@ -132,7 +145,21 @@ with c1:
             fill=True, fill_color=r.color, fill_opacity=0.8,
             popup=f"<b>{r.name}</b><br>Risk: {r.level}<br>Type: {r.type}"
         ).add_to(m)
-    st_folium(m, width=850, height=600)
+    st_folium(m, width=850, height=500, key="nova_map")
+
+    # Display Dossier if generated
+    if st.session_state.get('show_dossier'):
+        st.markdown("---")
+        st.subheader(f"📄 Intelligence Dossier: {st.session_state['last_scan_target']}")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write(f"**Target Status:** {final_df[final_df['name']==st.session_state['last_scan_target']]['level'].values[0]} PRIORITY")
+            st.write(f"**Detected Signals:** {', '.join(st.session_state['last_scan_found'])}")
+        with col_b:
+            st.write("**Recommended Action:** Field Observation Required")
+            st.write("**Analyst Note:** Review language indicates high probability of unlicensed activity or worker duress.")
+        if st.button("Close Dossier"):
+            st.session_state['show_dossier'] = False
 
 with c2:
     st.metric("Analyzed Targets", len(final_df))
@@ -140,4 +167,4 @@ with c2:
     high_risk = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(5)
     for _, row in high_risk.iterrows():
         st.warning(f"**{row['name']}**")
-        st.caption(f"Category: {row['type']} | Score: {round(row['raw_score'],1)}")
+        st.caption(f"Type: {row['type']} | Score: {round(row['raw_score'],1)}")
