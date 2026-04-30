@@ -26,20 +26,26 @@ except Exception:
 # ==========================================
 # 2. FBI CONNECTION (STABILIZED ENDPOINT)
 # ==========================================
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def get_fbi_status(api_key):
-    """Hits a stable endpoint for a connection heartbeat."""
-    url = f"https://api.usa.gov/crime/fbi/sapi/api/participation/national?api_key={api_key}"
+    # Try 1: The most stable National check
+    url_national = f"https://api.usa.gov/crime/fbi/sapi/api/participation/national?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url_national, timeout=10)
         if r.status_code == 200:
-            return "Online (FBI Data Link Active)"
-        return f"Offline (Status: {r.status_code})"
-    except Exception:
-        return "Offline (Connection Error)"
+            return "Online (National Link Active)"
+    except:
+        pass
 
-# Execute the connection check
-fbi_status = get_fbi_status(FBI_KEY)
+    # Try 2: The Virginia specific endpoint (if national fails)
+    url_va = f"https://api.usa.gov/crime/fbi/sapi/api/summarized/state/VA/violent-crime?api_key={api_key}"
+    try:
+        r = requests.get(url_va, timeout=10)
+        if r.status_code == 200:
+            return "Online (VA Link Active)"
+        return f"Offline (Status: {r.status_code})"
+    except:
+        return "Offline (Connection Error)"
 
 # ==========================================
 # 3. DATA LOADING (PUBLIC GITHUB)
