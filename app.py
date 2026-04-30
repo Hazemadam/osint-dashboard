@@ -10,7 +10,7 @@ from serpapi import GoogleSearch
 # ==========================================
 st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
 
-# We define these early so the app never says "NameError"
+# Placeholder variables to prevent NameErrors
 final_df = pd.DataFrame()
 poi_df = pd.DataFrame()
 census_df = pd.DataFrame()
@@ -31,14 +31,17 @@ except:
 def load_all_intel():
     USER, REPO = "Hazemadam", "osint-dashboard"
     base = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/"
+    
     try:
-        # Load all 6 sources
+        # UPDATED TO MATCH YOUR FILENAMES ON GITHUB
         p = pd.read_parquet(f"{base}nova_data.parquet")
         c = pd.read_parquet(f"{base}vulnerability_data.parquet")
-        f1 = pd.read_csv(f"{base}fbi_servitude.csv")
-        f2 = pd.read_csv(f"{base}fbi_sex_acts.csv")
-        l1 = pd.read_csv(f"{base}fbi_loc_sex.csv")
-        l2 = pd.read_csv(f"{base}fbi_loc_serv.csv")
+        
+        # Mapping long names from your screenshot
+        f1 = pd.read_csv(f"{base}Human%20Trafficking%2C%20Involuntary%20Servitude%20Reported%20by%20Population_04-29-2026.csv")
+        f2 = pd.read_csv(f"{base}Human%20Trafficking%2C%20Commercial%20Sex%20Acts%20Reported%20by%20Population_04-29-2026.csv")
+        l1 = pd.read_csv(f"{base}Location%20Type_04-29-2026.csv")
+        l2 = pd.read_csv(f"{base}Location%20Type_04-29-2026%20(1).csv")
 
         # Cleanup column names
         p.columns = [col.lower().strip() for col in p.columns]
@@ -47,7 +50,8 @@ def load_all_intel():
         
         return p, c, f1, f2, l1, l2
     except Exception as e:
-        # This prevents the app from crashing if GitHub is slow
+        # If this triggers, it means the URL is still wrong or GitHub is private
+        st.sidebar.error(f"Debug: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # Load the data
@@ -57,20 +61,20 @@ poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv = load_all_intel()
 # 2. INTELLIGENCE ENGINE
 # ==========================================
 def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
-    if poi.empty: return pd.DataFrame(), pd.Series(), 1.0
+    if poi.empty or s_trend.empty: return pd.DataFrame(), pd.Series(), 1.0
     
-    # 1. Multiplier Logic
+    # Trend Multiplier
     combined = s_trend.iloc[0, 1:].astype(float) + x_trend.iloc[0, 1:].astype(float)
     multiplier = 1.35 if combined.tail(6).mean() > 5 else 1.0
     
-    # 2. Venue Logic
+    # Location Mapping
     sex_map = dict(zip(lsx['key'], lsx['value']))
     serv_map = dict(zip(lsv['key'], lsv['value']))
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
     
     scores, colors, levels = [], [], []
     for _, row in poi.iterrows():
-        # Assign base weight based on FBI Location Files
+        # Match type to FBI location data
         if any(x in str(row['type']) for x in ['motel', 'hotel', 'spa', 'massage']):
             base = sex_map.get('Hotel/Motel/Etc.', 10) / 5
         elif any(x in str(row['type']) for x in ['apartment', 'residential']):
@@ -78,11 +82,9 @@ def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
         else:
             base = 5
 
-        # Get County Vulnerability
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
         vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
         
-        # Final Score
         fs = (base + (vuln * 10)) * multiplier
         scores.append(fs)
         
@@ -94,22 +96,20 @@ def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     return poi, combined, multiplier
 
 # ==========================================
-# 3. SIDEBAR & LOGIC EXECUTION
+# 3. SIDEBAR & INTERFACE
 # ==========================================
 st.sidebar.title("🛡️ NOVA Intel Command")
 
-if not poi_df.empty:
+if not poi_df.empty and not serv_trend.empty:
     processed_df, master_trend, threat_multiplier = run_threat_assessment(
         poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv
     )
     
     st.sidebar.metric("Regional Multiplier", f"{round(threat_multiplier, 2)}x")
     
-    if not master_trend.empty:
-        with st.sidebar.expander("📈 Regional Threat Trend"):
-            st.line_chart(master_trend.tail(18))
+    with st.sidebar.expander("📈 Regional Threat Trend"):
+        st.line_chart(master_trend.tail(18))
 
-    # Filtering
     all_types = sorted(processed_df['type'].unique())
     selected_types = st.sidebar.multiselect("Venue Categories", all_types, default=all_types[:3])
     final_df = processed_df[processed_df['type'].isin(selected_types)]
@@ -118,7 +118,7 @@ if not poi_df.empty:
         st.sidebar.markdown("---")
         target = st.sidebar.selectbox("Select Target for OSINT", sorted(final_df['name'].unique()))
         if st.sidebar.button("Run Deep Scan"):
-            with st.spinner(f"Scanning..."):
+            with st.spinner("Scanning..."):
                 search = GoogleSearch({"engine": "google_maps", "q": f"{target} Northern Virginia", "api_key": SERP_KEY})
                 res = search.get_dict()
                 d_id = res.get("local_results", [{}])[0].get("data_id") if "local_results" in res else None
@@ -128,10 +128,10 @@ if not poi_df.empty:
                     found = [f for r in revs for f in flags if f in str(r.get("snippet", "")).lower()]
                     st.session_state['scan_results'] = {target: list(set(found)) if found else ["CLEAR"]}
 else:
-    st.error("⚠️ Data connection lost. Check GitHub file names.")
+    st.sidebar.warning("⚠️ Data connection lost. Check GitHub for filenames.")
 
 # ==========================================
-# 4. MAIN DASHBOARD VISUALS
+# 4. MAIN MAP
 # ==========================================
 st.title("🛡️ NOVA Risk Intelligence")
 
@@ -139,8 +139,6 @@ c1, c2 = st.columns([3, 1])
 
 with c1:
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
-    
-    # SAFETY CHECK: Only loop if final_df has data
     if not final_df.empty:
         for r in final_df.itertuples():
             folium.CircleMarker(
@@ -148,22 +146,19 @@ with c1:
                 fill=True, fill_color=r.color, fill_opacity=0.8,
                 popup=f"<b>{r.name}</b><br>Score: {round(r.raw_score, 1)}"
             ).add_to(m)
-    
-    st_folium(m, width=900, height=550, key="nova_final_v7")
+    st_folium(m, width=900, height=550, key="nova_final_v8")
 
     if 'scan_results' in st.session_state and target in st.session_state['scan_results']:
         st.markdown("---")
         st.subheader(f"📄 Intelligence Report: {target}")
         res_list = st.session_state['scan_results'][target]
-        if "CLEAR" in res_list: st.success("✅ No linguistic red-flags detected.")
+        if "CLEAR" in res_list: st.success("✅ No flags detected.")
         else: st.error(f"🚩 **Flags Detected:** {', '.join(res_list)}")
 
 with c2:
     st.metric("Targets Identified", len(final_df))
-    
     if not loc_sex.empty:
         st.info(f"**Primary Vector:** {loc_sex.iloc[0]['key']}")
-    
     if not final_df.empty:
         st.markdown("---")
         watchlist = final_df.sort_values('raw_score', ascending=False).head(8)
