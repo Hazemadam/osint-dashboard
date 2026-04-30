@@ -38,21 +38,43 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame()
 
 # ================================
-# 2. FBI INTELLIGENCE CONNECTION
 # ================================
-@st.cache_data(ttl=86400)
+# 2. UPDATED FBI INTELLIGENCE CONNECTION
+# ================================
+@st.cache_data(ttl=3600)
 def get_fbi_status():
-    url = f"https://api.usa.gov/crime/fbi/sapi/api/participation/states/VA?api_key={FBI_KEY}"
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            return r.json().get('data', [])[-1]
-        return None
-    except:
-        return None
+    # Attempt 1: The Virginia Participation Endpoint
+    urls = [
+        f"https://api.usa.gov/crime/fbi/sapi/api/participation/states/VA?api_key={FBI_KEY}",
+        f"https://api.usa.gov/crime/fbi/sapi/api/agencies?api_key={FBI_KEY}" # Backup check
+    ]
+    
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                # If it's the participation data, return the year
+                if 'data' in data and len(data['data']) > 0:
+                    return f"Active (Year: {data['data'][-1].get('year')})"
+                # If it's just the agency list, it still means we are CONNECTED
+                return "Connected (General)"
+            elif r.status_code == 403:
+                return "Invalid API Key"
+        except Exception as e:
+            continue
+            
+    return "Offline"
 
-poi_df, census_df = load_data()
-fbi_intel = get_fbi_status()
+# Update your sidebar code to show the specific status
+fbi_status = get_fbi_status()
+
+if "Active" in fbi_status or "Connected" in fbi_status:
+    st.sidebar.success(f"✅ FBI API: {fbi_status}")
+elif "Invalid" in fbi_status:
+    st.sidebar.error("❌ FBI API: Key Rejected (Check Secrets)")
+else:
+    st.sidebar.warning("⚠️ FBI API: No Response (Server Down)")
 
 # ================================
 # 3. SIDEBAR & LOGIC
