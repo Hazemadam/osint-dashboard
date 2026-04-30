@@ -6,10 +6,11 @@ import requests
 from serpapi import GoogleSearch
 
 # ==========================================
-# 1. INITIAL CONFIG
+# 1. INITIAL CONFIG & DEFAULTS
 # ==========================================
 st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
 
+# Persistent state initialization
 final_df = pd.DataFrame()
 poi_df = pd.DataFrame()
 census_df = pd.DataFrame()
@@ -18,71 +19,83 @@ sex_trend = pd.DataFrame()
 loc_sex = pd.DataFrame()
 loc_serv = pd.DataFrame()
 threat_multiplier = 1.0
+target = None
 
 try:
     SERP_KEY = st.secrets["SERP_KEY"]
 except:
-    st.error("🔑 SERP_KEY missing in Secrets!")
+    st.error("🔑 SERP_KEY missing in Streamlit Secrets!")
     st.stop()
 
 @st.cache_data(ttl=3600)
 def load_all_intel():
     USER, REPO = "Hazemadam", "osint-dashboard"
     base = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/"
+    
     try:
+        # Core Parquet Data
         p = pd.read_parquet(f"{base}nova_data.parquet")
         c = pd.read_parquet(f"{base}vulnerability_data.parquet")
+        
+        # FBI Renamed CSV Data
         f_serv = pd.read_csv(f"{base}fbi_servitude.csv")
         f_sex = pd.read_csv(f"{base}fbi_sex_acts.csv")
         l_sex = pd.read_csv(f"{base}fbi_locations_sex_acts.csv")
         l_serv = pd.read_csv(f"{base}fbi_locations_servitude.csv")
 
+        # Column Standardizing
         p.columns = [col.lower().strip() for col in p.columns]
         if 'longitude' in p.columns: p = p.rename(columns={'longitude': 'lng', 'latitude': 'lat'})
         c.columns = [col.lower().strip() for col in c.columns]
         
         return p, c, f_serv, f_sex, l_sex, l_serv
     except Exception as e:
-        st.sidebar.error(f"📡 Connection Issue: {e}")
+        st.sidebar.error(f"📡 Data Link Error: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+# Execute Data Load
 poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv = load_all_intel()
 
 # ==========================================
-# 2. THE RISK ENGINE (FINAL CALIBRATION)
+# 2. INTELLIGENCE ENGINE (BALANCED CALIBRATION)
 # ==========================================
 def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     if poi.empty or s_trend.empty: return pd.DataFrame(), pd.Series(), 1.0
     
+    # Regional Multiplier (Pulse Check)
     combined = s_trend.iloc[0, 1:].astype(float) + x_trend.iloc[0, 1:].astype(float)
     multiplier = 1.25 if combined.tail(6).mean() > 5 else 1.0
     
+    # Mapping logic
     sex_map = dict(zip(lsx['key'], lsx['value']))
     serv_map = dict(zip(lsv['key'], lsv['value']))
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
     
     scores, colors, levels = [], [], []
     for _, row in poi.iterrows():
-        # Venue Weights
+        # Step A: FBI Base Weights
         if any(x in str(row['type']) for x in ['motel', 'hotel', 'spa', 'massage']):
-            base = (sex_map.get('Hotel/Motel/Etc.', 10) / 6) + 6 # Increased floor
+            # FBI reports ~108 for hotels, we scale this for a base of ~14-16
+            base = (sex_map.get('Hotel/Motel/Etc.', 10) / 7) + 5 
         elif any(x in str(row['type']) for x in ['apartment', 'residential', 'home']):
-            base = (serv_map.get('Residence/Home', 5) / 2) + 3
+            # FBI reports ~23 for homes, scale for a base of ~10-12
+            base = (serv_map.get('Residence/Home', 5) / 2) + 4
         else:
-            base = 5
+            base = 6
 
-        # Vulnerability Weight (Giving it more 'punch')
+        # Step B: Census Vulnerability Influence
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
         vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
         
-        # New Formula: Base + (Vuln * 15) to make vuln count more
-        fs = (base + (vuln * 15)) * multiplier
+        # Step C: Final Calculation
+        # The 12x multiplier on vulnerability creates the "Medium" buffer zone
+        fs = (base + (vuln * 12)) * multiplier
         scores.append(fs)
         
-        # REFINED THRESHOLDS
-        if fs >= 22: # Lowered from 24
+        # Step D: TIER ASSIGNMENT (THE SWEET SPOT)
+        if fs >= 24: 
             colors.append('red'); levels.append('HIGH')
-        elif 14 <= fs < 22: # Lowered from 16
+        elif 17 <= fs < 24: 
             colors.append('orange'); levels.append('MEDIUM')
         else: 
             colors.append('blue'); levels.append('LOW')
@@ -110,6 +123,7 @@ if not poi_df.empty and not serv_trend.empty:
     all_types = sorted(processed_df['type'].unique())
     selected_types = st.sidebar.multiselect("Venue Categories", all_types, default=all_types[:5])
     
+    # Apply Filtering
     final_df = processed_df[
         (processed_df['level'].isin(selected_levels)) & 
         (processed_df['type'].isin(selected_types))
@@ -117,9 +131,9 @@ if not poi_df.empty and not serv_trend.empty:
 
     if not final_df.empty:
         st.sidebar.markdown("---")
-        target = st.sidebar.selectbox("Select Target", sorted(final_df['name'].unique()))
+        target = st.sidebar.selectbox("Select Target for OSINT", sorted(final_df['name'].unique()))
         if st.sidebar.button("Run Deep Scan"):
-            with st.spinner("Scanning..."):
+            with st.spinner("Scanning for Red Flags..."):
                 search = GoogleSearch({"engine": "google_maps", "q": f"{target} Northern Virginia", "api_key": SERP_KEY})
                 res = search.get_dict()
                 d_id = res.get("local_results", [{}])[0].get("data_id") if "local_results" in res else None
@@ -129,7 +143,7 @@ if not poi_df.empty and not serv_trend.empty:
                     found = [f for r in revs for f in flags if f in str(r.get("snippet", "")).lower()]
                     st.session_state['scan_results'] = {target: list(set(found)) if found else ["CLEAR"]}
 else:
-    st.sidebar.warning("📡 Connecting...")
+    st.sidebar.warning("📡 Connecting to GitHub data sources...")
 
 # ==========================================
 # 4. MAIN INTERFACE
@@ -139,6 +153,7 @@ st.title("🛡️ NOVA Risk Intelligence")
 col1, col2 = st.columns([3, 1])
 
 with col1:
+    # Set Map focal point to Fairfax/NOVA area
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
     if not final_df.empty:
         for r in final_df.itertuples():
@@ -147,17 +162,19 @@ with col1:
                 fill=True, fill_color=r.color, fill_opacity=0.8,
                 popup=f"<b>{r.name}</b><br>Score: {round(r.raw_score, 1)}<br>Tier: {r.level}"
             ).add_to(m)
-    st_folium(m, width=900, height=550, key="nova_v12")
+    st_folium(m, width=900, height=550, key="nova_v13_final")
 
-    if 'scan_results' in st.session_state and target in st.session_state:
+    # Intelligence Scan Results
+    if 'scan_results' in st.session_state and target in st.session_state['scan_results']:
         st.markdown("---")
         st.subheader(f"📄 Intelligence Report: {target}")
-        res_list = st.session_state['scan_results'].get(target, ["CLEAR"])
-        if "CLEAR" in res_list: st.success("✅ No flags detected.")
-        else: st.error(f"🚩 **Flags:** {', '.join(res_list)}")
+        res_list = st.session_state['scan_results'][target]
+        if "CLEAR" in res_list: st.success("✅ No linguistic red-flags detected in local metadata.")
+        else: st.error(f"🚩 **Metadata Flags Detected:** {', '.join(res_list)}")
 
 with col2:
     st.metric("Visible Targets", len(final_df))
+    
     if not loc_sex.empty:
         st.info(f"**FBI Primary Vector:** {loc_sex.iloc[0]['key']}")
     
@@ -168,4 +185,4 @@ with col2:
         for _, row in watchlist.iterrows():
             icon = "🔴" if row['level'] == 'HIGH' else ("🟠" if row['level'] == 'MEDIUM' else "🔵")
             st.write(f"{icon} **{row['name']}**")
-            st.caption(f"Score: {round(row['raw_score'], 1)}")
+            st.caption(f"Score: {round(row['raw_score'], 1)} | {row['type']}")
