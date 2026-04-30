@@ -5,98 +5,113 @@ import folium
 from streamlit_folium import st_folium
 
 # ==========================================
-# 1. INITIAL SETUP & DEFAULTS (The "Safety Net")
+# 1. INITIAL SETUP & "SAFETY NET" DEFAULTS
 # ==========================================
 st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
 
-# We define these globally so they ALWAYS exist
-fbi_status = "Checking..." 
+# Pre-define all variables to prevent any 'NameError'
+fbi_status = "Initializing..."
 final_df = pd.DataFrame()
 poi_df = pd.DataFrame()
+census_df = pd.DataFrame()
 
-# Securely grab keys
+# Securely grab keys from Streamlit Secrets
 try:
     FBI_KEY = st.secrets["FBI_KEY"]
     SERP_KEY = st.secrets["SERP_KEY"]
-except Exception as e:
+except Exception:
     st.error("🔑 Secrets missing! Add FBI_KEY and SERP_KEY to Streamlit Settings.")
     st.stop()
 
 # ==========================================
-# 2. FBI CONNECTION LOGIC
+# 2. FBI CONNECTION (STABILIZED ENDPOINT)
 # ==========================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def get_fbi_status(api_key):
-    # Using the most reliable "byStateAbbreviation" endpoint
-    url = f"https://api.usa.gov/crime/fbi/sapi/api/agencies/byStateAbbreviation/VA?api_key={api_key}"
+    """Hits the stable 'summarized/state' endpoint for a connection check."""
+    # This endpoint is the 'Gold Standard' for reliability in the FBI API
+    url = f"https://api.usa.gov/crime/fbi/sapi/api/summarized/state/VA/violent-crime?api_key={api_key}"
+    
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            # The FBI returns a dictionary; the agencies are usually in a 'data' list or the root
-            count = len(data) if isinstance(data, list) else "Connected"
-            return f"Online ({count} Agencies)"
+            return "Online (VA Crime Feed Active)"
+        elif r.status_code == 404:
+            # Automatic fallback to the simplest national participation check
+            fallback = f"https://api.usa.gov/crime/fbi/sapi/api/participation/national?api_key={api_key}"
+            if requests.get(fallback, timeout=5).status_code == 200:
+                return "Online (National Feed Active)"
+            return "Offline (404: Endpoint Moved)"
         return f"Offline (Status: {r.status_code})"
-    except Exception as e:
-        return f"Offline (Connection Error)"
+    except Exception:
+        return "Offline (Connection Error)"
 
-# Assign the variable immediately
+# Execute the connection check
 fbi_status = get_fbi_status(FBI_KEY)
 
 # ==========================================
-# 3. DATA LOADING
+# 3. DATA LOADING (PUBLIC GITHUB)
 # ==========================================
 @st.cache_data(ttl=3600)
-def load_github_data():
+def load_data():
     USER, REPO = "Hazemadam", "osint-dashboard"
     base_url = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/"
     try:
         poi = pd.read_parquet(f"{base_url}nova_data.parquet")
+        census = pd.read_parquet(f"{base_url}vulnerability_data.parquet")
+        
+        # Clean POI data
         poi.columns = [c.lower().strip() for c in poi.columns]
         poi = poi.rename(columns={'longitude': 'lng', 'latitude': 'lat'})
-        return poi
-    except:
-        return pd.DataFrame()
+        poi['type'] = poi['type'].astype(str).str.lower().str.strip()
+        
+        # Clean Census data
+        census.columns = [c.lower().strip() for c in census.columns]
+        return poi, census
+    except Exception as e:
+        st.error(f"⚠️ GitHub Data Load Failure: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
-poi_df = load_github_data()
+poi_df, census_df = load_data()
 
 # ==========================================
-# 4. SIDEBAR & UI
+# 4. SIDEBAR & RISK LOGIC
 # ==========================================
 st.sidebar.title("🛡️ Intelligence Control")
+st.sidebar.info(f"Key identified: {FBI_KEY[:4]}****")
 
-# Sanity check for the key (first 4 chars)
-st.sidebar.info(f"Key detected: {FBI_KEY[:4]}****")
-
+# Display Connection Heartbeat
 if "Online" in fbi_status:
     st.sidebar.success(f"✅ FBI API: {fbi_status}")
 else:
     st.sidebar.warning(f"⚠️ FBI API: {fbi_status}")
 
+# Processing logic (only if data exists)
 if not poi_df.empty:
+    # 1. Calculate County Risk from Census
+    county_risk = census_df.groupby('county')['vulnerability_score'].mean().to_dict()
+    
+    # 2. Assign Risk Scores
+    weights = {'stripclub': 15, 'massage': 12, 'nightclub': 10, 'motel': 10, 'spa': 6}
+    
+    scores, colors, levels = [], [], []
+    for _, row in poi_df.iterrows():
+        base = weights.get(row['type'], 2)
+        c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
+        vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
+        
+        fs = base + (vuln * 10)
+        scores.append(fs)
+        
+        if fs >= 17: colors.append('red'); levels.append('HIGH')
+        elif fs >= 11: colors.append('orange'); levels.append('MEDIUM')
+        else: colors.append('blue'); levels.append('LOW')
+    
+    poi_df['raw_score'], poi_df['color'], poi_df['level'] = scores, colors, levels
+
+    # 3. Filter Controls
     all_cats = sorted(poi_df['type'].unique().tolist())
     selected_types = st.sidebar.multiselect("Categories", all_cats, default=all_cats[:3])
-    final_df = poi_df[poi_df['type'].isin(selected_types)]
-
-# ==========================================
-# 5. MAIN DASHBOARD
-# ==========================================
-st.title("🛡️ NOVA Strategic Intelligence")
-
-c1, c2 = st.columns([3, 1])
-
-with c1:
-    m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
-    if not final_df.empty:
-        for r in final_df.itertuples():
-            folium.CircleMarker(
-                location=[r.lat, r.lng], 
-                radius=7, 
-                color='red', 
-                fill=True,
-                popup=r.name
-            ).add_to(m)
-    st_folium(m, width=800, height=500, key="nova_map_final")
-
-with c2:
-    st.metric("Total Targets", len(final_df))
+    selected_risks = st.sidebar.multiselect("Risk Levels", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM'])
+    
+    final_df = poi_df[(poi_df['type'].
