@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd  # Fixed the import error here
+import pandas as pd  # FIXED: No more ModuleNotFoundError
 import folium
 from streamlit_folium import st_folium
 import numpy as np
@@ -23,32 +23,29 @@ def load_data():
         poi = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/nova_data.parquet")
         census = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/vulnerability_data.parquet")
         
-        # CLEANING & UNIFORMITY
+        # COLUMN CLEANING
         poi.columns = [c.lower().strip() for c in poi.columns]
         poi = poi.rename(columns={'longitude': 'lng', 'lon': 'lng', 'latitude': 'lat'})
         
-        # Force categories to lowercase to ensure filters never miss a match
+        # Ensure categories are lowercase strings for bulletproof filtering
         if 'type' in poi.columns:
             poi['type'] = poi['type'].astype(str).str.lower().str.strip()
         
         census.columns = [c.lower().strip() for c in census.columns]
         return poi, census
     except Exception as e:
-        st.error(f"Data Error: {e}")
+        st.error(f"Data Connection Failed: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 poi_df, census_df = load_data()
 
 # ================================
-# 2. THE RISK BRAIN
+# 2. THE RISK BRAIN (Balanced Logic)
 # ================================
 def get_risk_scores(poi, census):
     if poi.empty or census.empty: return poi
     
-    # Map vulnerability by county
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
-    
-    # Inherent weights for sectors (Adjust these to change what turns RED)
     weights = {'stripclub': 15, 'massage': 12, 'nightclub': 10, 'motel': 10, 'spa': 6, 'bar': 4}
     
     scores, colors, levels = [], [], []
@@ -62,7 +59,6 @@ def get_risk_scores(poi, census):
         final_score = base + (vuln * 10)
         scores.append(final_score)
         
-        # Risk Tiers
         if final_score >= 17:
             colors.append('red'); levels.append('HIGH')
         elif final_score >= 11:
@@ -85,7 +81,6 @@ if not poi_df.empty:
     processed_df = get_risk_scores(poi_df, census_df)
     
     st.sidebar.subheader("Live Filters")
-    # Get unique types and show them
     available_types = sorted(processed_df['type'].unique())
     selected_types = st.sidebar.multiselect("Business Categories", available_types, default=[t for t in ['motel', 'massage', 'nightclub'] if t in available_types])
     selected_risks = st.sidebar.multiselect("Risk Tiers", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM'])
@@ -107,17 +102,13 @@ if not poi_df.empty:
                 search = GoogleSearch({"engine": "google_maps", "q": f"{target} Northern Virginia", "api_key": api_key})
                 res = search.get_dict()
                 
-                # Safety check for local results
-                d_id = None
-                if "local_results" in res and len(res["local_results"]) > 0:
-                    d_id = res["local_results"][0].get("data_id")
+                d_id = res.get("local_results", [{}])[0].get("data_id") if "local_results" in res and len(res["local_results"]) > 0 else None
                 
                 if d_id:
                     rev_search = GoogleSearch({"engine": "google_maps_reviews", "data_id": d_id, "api_key": api_key})
-                    reviews_data = rev_search.get_dict()
-                    reviews = reviews_data.get("reviews", [])
+                    reviews = rev_search.get_dict().get("reviews", [])
                     
-                    # MASTER SURGICAL FLAGS
+                    # ENHANCED FLAG LIST
                     flags = ['tired', 'confused', 'exhausted', 'scared', 'after hours', 'buzzer', 'locked', 'police', 'raid', 'extra', 'special', 'cash only', 'forced']
                     
                     found = [f for r in reviews for f in flags if f in str(r.get("snippet", "")).lower()]
@@ -126,12 +117,10 @@ if not poi_df.empty:
                         st.session_state['last_scan_found'] = list(set(found))
                         st.session_state['last_scan_target'] = target
                         st.sidebar.error(f"🚩 {len(set(found))} RED FLAGS FOUND")
-                        for f in set(found): st.sidebar.write(f"- {f}")
+                        for f in set(found): st.sidebar.write(f"- Found: **{f}**")
                     else:
-                        st.sidebar.success("No red flag keywords found.")
+                        st.sidebar.success("No indicators found.")
                         st.session_state['last_scan_found'] = None
-                else:
-                    st.sidebar.warning("Could not find a digital ID for this target.")
 
 # ================================
 # 4. MAIN DASHBOARD
@@ -147,20 +136,18 @@ with col_map:
         folium.CircleMarker(
             location=[r.lat, r.lng], radius=8, color='white', weight=0.5,
             fill=True, fill_color=r.color, fill_opacity=0.8,
-            popup=f"<b>{r.name}</b><br>Type: {r.type}<br>Risk: {r.level}"
+            popup=f"<b>{r.name}</b><br>Type: {r.type}<br>Score: {round(r.raw_score, 1)}"
         ).add_to(m)
     
     st_folium(m, width=900, height=550, key="main_map")
 
-    # Dossier Display
-    if st.session_state.get('last_scan_found') and st.session_state.get('last_scan_target'):
+    if st.session_state['last_scan_found'] and st.session_state['last_scan_target']:
         st.markdown("---")
         st.subheader(f"📄 Intelligence Dossier: {st.session_state['last_scan_target']}")
-        st.info(f"**Indicators Found:** {', '.join(st.session_state['last_scan_found'])}")
-        st.write("*Note: Testimony suggests behavioral anomalies or non-standard operations.*")
+        st.info(f"**Flags:** {', '.join(st.session_state['last_scan_found'])}")
 
 with col_metrics:
-    st.metric("Filtered Targets", len(final_df))
+    st.metric("Visible Targets", len(final_df))
     st.subheader("⚠️ Priority Watchlist")
     watchlist = final_df[final_df['level'] == 'HIGH'].sort_values('raw_score', ascending=False).head(10)
     for _, row in watchlist.iterrows():
