@@ -62,47 +62,47 @@ poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv = load_all_intel()
 def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     if poi.empty or s_trend.empty: return pd.DataFrame(), pd.Series(), 1.0
     
-    # Regional Multiplier (Pulse Check)
+    # 1. Regional Multiplier
     combined = s_trend.iloc[0, 1:].astype(float) + x_trend.iloc[0, 1:].astype(float)
     multiplier = 1.25 if combined.tail(6).mean() > 5 else 1.0
     
-    # Mapping logic
     sex_map = dict(zip(lsx['key'], lsx['value']))
     serv_map = dict(zip(lsv['key'], lsv['value']))
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
     
     scores, colors, levels = [], [], []
     for _, row in poi.iterrows():
-        # Step A: FBI Base Weights
-        if any(x in str(row['type']) for x in ['motel', 'hotel', 'spa', 'massage']):
-            # FBI reports ~108 for hotels, we scale this for a base of ~14-16
-            base = (sex_map.get('Hotel/Motel/Etc.', 10) / 7) + 5 
-        elif any(x in str(row['type']) for x in ['apartment', 'residential', 'home']):
-            # FBI reports ~23 for homes, scale for a base of ~10-12
-            base = (serv_map.get('Residence/Home', 5) / 2) + 4
+        # 2. FBI Base Weight (Calibrated)
+        if any(x in str(row['type']).lower() for x in ['motel', 'hotel', 'spa', 'massage']):
+            base = 12  # Fixed base for high-risk types
+        elif any(x in str(row['type']).lower() for x in ['apartment', 'residential', 'home']):
+            base = 8   # Fixed base for mid-risk types
         else:
-            base = 6
+            base = 4   # Fixed base for others
 
-        # Step B: Census Vulnerability Influence
+        # 3. Normalized Vulnerability
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
+        # Find the county vuln score or default to 0.5
         vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
         
-        # Step C: Final Calculation
-        # The 12x multiplier on vulnerability creates the "Medium" buffer zone
-        fs = (base + (vuln * 12)) * multiplier
+        # 4. The Final Score Formula
+        # We use a 10-point scale for vulnerability to keep things predictable
+        fs = (base + (vuln * 10)) * multiplier
         scores.append(fs)
         
-        # Step D: TIER ASSIGNMENT (THE SWEET SPOT)
-        if fs >= 24: 
+        # 5. NEW STRETCHED THRESHOLDS
+        # High is now 22+ (Requires High-type + High-vuln)
+        if fs >= 22: 
             colors.append('red'); levels.append('HIGH')
-        elif 17 <= fs < 24: 
+        # Medium is 15 to 22 (Captures Mid-types or High-types in safer areas)
+        elif 15 <= fs < 22: 
             colors.append('orange'); levels.append('MEDIUM')
+        # Low is anything below 15
         else: 
             colors.append('blue'); levels.append('LOW')
             
     poi['raw_score'], poi['color'], poi['level'] = scores, colors, levels
     return poi, combined, multiplier
-
 # ==========================================
 # 3. SIDEBAR CONTROLS
 # ==========================================
