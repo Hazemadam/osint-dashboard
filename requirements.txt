@@ -8,3 +8,10 @@ census
 us
 geopandas
 shapely
+streamlit
+pandas
+folium
+streamlit-folium
+numpy
+pyarrow
+google-search-results
