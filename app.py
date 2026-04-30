@@ -3,27 +3,29 @@ import pandas as pd
 import requests
 import folium
 from streamlit_folium import st_folium
-import numpy as np
-from serpapi import GoogleSearch
 
 # ================================
 # 1. INITIAL CONFIG & SECRETS
 # ================================
 st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
 
-# Initialize final_df so the map doesn't crash if filters aren't ready
-final_df = pd.DataFrame() 
-
-# Using your keys
-FBI_KEY = "sB9Qct1qwv7c5tKpEE8SUAzmOoRfCmKooX5txXSI"
-SERP_KEY = "e8620ecba88a6a45350306e642ce3b86db601631dba000d19d23d4cd7c7c4550"
+# Fetching keys from Streamlit Cloud Secrets (Not hardcoded!)
+try:
+    FBI_KEY = st.secrets["FBI_KEY"]
+    SERP_KEY = st.secrets["SERP_KEY"]
+except:
+    st.error("🔑 Secrets missing! Add FBI_KEY and SERP_KEY to Streamlit Cloud Settings.")
+    st.stop()
 
 @st.cache_data(ttl=3600)
 def load_data():
+    # Use your Public GitHub links
     USER, REPO = "Hazemadam", "osint-dashboard"
+    base_url = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/"
+    
     try:
-        poi = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/nova_data.parquet")
-        census = pd.read_parquet(f"https://raw.githubusercontent.com/{USER}/{REPO}/main/vulnerability_data.parquet")
+        poi = pd.read_parquet(f"{base_url}nova_data.parquet")
+        census = pd.read_parquet(f"{base_url}vulnerability_data.parquet")
         
         poi.columns = [c.lower().strip() for c in poi.columns]
         poi = poi.rename(columns={'longitude': 'lng', 'latitude': 'lat'})
@@ -36,7 +38,7 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame()
 
 # ================================
-# 2. INTELLIGENCE GATHERING
+# 2. FBI INTELLIGENCE CONNECTION
 # ================================
 @st.cache_data(ttl=86400)
 def get_fbi_status():
@@ -57,11 +59,10 @@ fbi_intel = get_fbi_status()
 # ================================
 st.sidebar.title("🛡️ Intelligence Control")
 
-# FBI Status Display
 if fbi_intel:
-    st.sidebar.success(f"✅ FBI Connected: {fbi_intel.get('year')}")
+    st.sidebar.success(f"✅ FBI API Connected ({fbi_intel.get('year')})")
 else:
-    st.sidebar.warning("❌ FBI Connection Offline")
+    st.sidebar.warning("❌ FBI API Offline")
 
 if not poi_df.empty:
     # Build Risk Scores
@@ -84,14 +85,15 @@ if not poi_df.empty:
 
     # Filter UI
     all_cats = sorted(poi_df['type'].unique().tolist())
-    selected_types = st.sidebar.multiselect("Categories", all_cats, default=all_cats[:3], key="cat_v6")
-    selected_risks = st.sidebar.multiselect("Risk Levels", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW'], key="risk_v6")
+    selected_types = st.sidebar.multiselect("Categories", all_cats, default=all_cats[:3])
+    selected_risks = st.sidebar.multiselect("Risk Levels", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW'])
     
-    # CRITICAL: Define final_df here
     final_df = poi_df[(poi_df['type'].isin(selected_types)) & (poi_df['level'].isin(selected_risks))]
+else:
+    final_df = pd.DataFrame()
 
 # ================================
-# 4. MAP & WATCHLIST
+# 4. MAP DISPLAY
 # ================================
 st.title("🛡️ NOVA Strategic Intelligence")
 
@@ -100,7 +102,6 @@ c1, c2 = st.columns([3, 1])
 with c1:
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
     
-    # SAFETY CHECK: Only loop if final_df is not empty and defined
     if not final_df.empty:
         for r in final_df.itertuples():
             folium.CircleMarker(
@@ -109,7 +110,7 @@ with c1:
                 popup=f"<b>{r.name}</b><br>Type: {r.type}"
             ).add_to(m)
     
-    st_folium(m, width=900, height=500, key="nova_map_v6")
+    st_folium(m, width=900, height=500, key="nova_map_final")
 
 with c2:
     st.metric("Pins Tracked", len(final_df))
