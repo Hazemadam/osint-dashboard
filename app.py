@@ -18,7 +18,6 @@ sex_trend = pd.DataFrame()
 loc_sex = pd.DataFrame()
 loc_serv = pd.DataFrame()
 threat_multiplier = 1.0
-target = None
 
 try:
     SERP_KEY = st.secrets["SERP_KEY"]
@@ -50,7 +49,7 @@ def load_all_intel():
 poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv = load_all_intel()
 
 # ==========================================
-# 2. THE RISK ENGINE (ADJUSTED CALIBRATION)
+# 2. THE RISK ENGINE (FINAL CALIBRATION)
 # ==========================================
 def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     if poi.empty or s_trend.empty: return pd.DataFrame(), pd.Series(), 1.0
@@ -64,27 +63,26 @@ def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     
     scores, colors, levels = [], [], []
     for _, row in poi.iterrows():
-        # Calibrating weights to normalize the scale
+        # Venue Weights
         if any(x in str(row['type']) for x in ['motel', 'hotel', 'spa', 'massage']):
-            # FBI Sex Act weights (max ~108)
-            base = (sex_map.get('Hotel/Motel/Etc.', 10) / 8) + 5
+            base = (sex_map.get('Hotel/Motel/Etc.', 10) / 6) + 6 # Increased floor
         elif any(x in str(row['type']) for x in ['apartment', 'residential', 'home']):
-            # FBI Servitude weights (max ~23)
-            base = (serv_map.get('Residence/Home', 5) / 2) + 2
+            base = (serv_map.get('Residence/Home', 5) / 2) + 3
         else:
-            base = 4
+            base = 5
 
+        # Vulnerability Weight (Giving it more 'punch')
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
         vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
         
-        # Formula: Base FBI weight + (Vulnerability scaled to 10) * Multiplier
-        fs = (base + (vuln * 10)) * multiplier
+        # New Formula: Base + (Vuln * 15) to make vuln count more
+        fs = (base + (vuln * 15)) * multiplier
         scores.append(fs)
         
-        # ADJUSTED THRESHOLDS FOR BETTER DISTRIBUTION
-        if fs >= 24: 
+        # REFINED THRESHOLDS
+        if fs >= 22: # Lowered from 24
             colors.append('red'); levels.append('HIGH')
-        elif 16 <= fs < 24: 
+        elif 14 <= fs < 22: # Lowered from 16
             colors.append('orange'); levels.append('MEDIUM')
         else: 
             colors.append('blue'); levels.append('LOW')
@@ -106,9 +104,7 @@ if not poi_df.empty and not serv_trend.empty:
 
     st.sidebar.subheader("Filter by Threat")
     selected_levels = st.sidebar.multiselect(
-        "Threat Tiers", 
-        ['HIGH', 'MEDIUM', 'LOW'], 
-        default=['HIGH', 'MEDIUM', 'LOW'] # Defaulted to show all to verify the fix
+        "Threat Tiers", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW']
     )
 
     all_types = sorted(processed_df['type'].unique())
@@ -121,7 +117,7 @@ if not poi_df.empty and not serv_trend.empty:
 
     if not final_df.empty:
         st.sidebar.markdown("---")
-        target = st.sidebar.selectbox("Select Target for OSINT", sorted(final_df['name'].unique()))
+        target = st.sidebar.selectbox("Select Target", sorted(final_df['name'].unique()))
         if st.sidebar.button("Run Deep Scan"):
             with st.spinner("Scanning..."):
                 search = GoogleSearch({"engine": "google_maps", "q": f"{target} Northern Virginia", "api_key": SERP_KEY})
@@ -133,7 +129,7 @@ if not poi_df.empty and not serv_trend.empty:
                     found = [f for r in revs for f in flags if f in str(r.get("snippet", "")).lower()]
                     st.session_state['scan_results'] = {target: list(set(found)) if found else ["CLEAR"]}
 else:
-    st.sidebar.warning("📡 Waiting for data connection...")
+    st.sidebar.warning("📡 Connecting...")
 
 # ==========================================
 # 4. MAIN INTERFACE
@@ -151,25 +147,25 @@ with col1:
                 fill=True, fill_color=r.color, fill_opacity=0.8,
                 popup=f"<b>{r.name}</b><br>Score: {round(r.raw_score, 1)}<br>Tier: {r.level}"
             ).add_to(m)
-    st_folium(m, width=900, height=550, key="nova_final_v11")
+    st_folium(m, width=900, height=550, key="nova_v12")
 
-    if 'scan_results' in st.session_state and target in st.session_state['scan_results']:
+    if 'scan_results' in st.session_state and target in st.session_state:
         st.markdown("---")
         st.subheader(f"📄 Intelligence Report: {target}")
-        res_list = st.session_state['scan_results'][target]
-        if "CLEAR" in res_list: st.success("✅ No red-flags detected in metadata.")
-        else: st.error(f"🚩 **Flags Detected:** {', '.join(res_list)}")
+        res_list = st.session_state['scan_results'].get(target, ["CLEAR"])
+        if "CLEAR" in res_list: st.success("✅ No flags detected.")
+        else: st.error(f"🚩 **Flags:** {', '.join(res_list)}")
 
 with col2:
-    st.metric("Filtered Targets", len(final_df))
+    st.metric("Visible Targets", len(final_df))
     if not loc_sex.empty:
         st.info(f"**FBI Primary Vector:** {loc_sex.iloc[0]['key']}")
     
     if not final_df.empty:
         st.markdown("---")
-        st.subheader("⚠️ Priority List")
+        st.subheader("⚠️ Priority Watchlist")
         watchlist = final_df.sort_values('raw_score', ascending=False).head(10)
         for _, row in watchlist.iterrows():
             icon = "🔴" if row['level'] == 'HIGH' else ("🟠" if row['level'] == 'MEDIUM' else "🔵")
             st.write(f"{icon} **{row['name']}**")
-            st.caption(f"Score: {round(row['raw_score'], 1)} | {row['type']}")
+            st.caption(f"Score: {round(row['raw_score'], 1)}")
