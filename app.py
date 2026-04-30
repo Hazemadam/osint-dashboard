@@ -9,80 +9,60 @@ from streamlit_folium import st_folium
 # ================================
 st.set_page_config(page_title="NOVA Strategic Intelligence", layout="wide")
 
-# Fetching keys from Streamlit Cloud Secrets (Not hardcoded!)
+# DEFINE VARIABLES GLOBALLY FIRST (This stops NameErrors)
+fbi_intel = None 
+final_df = pd.DataFrame()
+
+# Fetching keys from Streamlit Secrets
 try:
     FBI_KEY = st.secrets["FBI_KEY"]
     SERP_KEY = st.secrets["SERP_KEY"]
-except:
-    st.error("🔑 Secrets missing! Add FBI_KEY and SERP_KEY to Streamlit Cloud Settings.")
+except Exception as e:
+    st.error("🔑 Secrets missing! Please add FBI_KEY and SERP_KEY to Streamlit Cloud Settings.")
     st.stop()
 
+# ================================
+# 2. DATA LOADERS
+# ================================
 @st.cache_data(ttl=3600)
 def load_data():
-    # Use your Public GitHub links
     USER, REPO = "Hazemadam", "osint-dashboard"
     base_url = f"https://raw.githubusercontent.com/{USER}/{REPO}/main/"
-    
     try:
         poi = pd.read_parquet(f"{base_url}nova_data.parquet")
         census = pd.read_parquet(f"{base_url}vulnerability_data.parquet")
-        
         poi.columns = [c.lower().strip() for c in poi.columns]
         poi = poi.rename(columns={'longitude': 'lng', 'latitude': 'lat'})
         poi['type'] = poi['type'].astype(str).str.lower().str.strip()
-        
         census.columns = [c.lower().strip() for c in census.columns]
         return poi, census
     except Exception as e:
         st.error(f"⚠️ Data Load Failure: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# ================================
-# ================================
-# 2. UPDATED FBI INTELLIGENCE CONNECTION
-# ================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def get_fbi_status():
-    # Attempt 1: The Virginia Participation Endpoint
-    urls = [
-        f"https://api.usa.gov/crime/fbi/sapi/api/participation/states/VA?api_key={FBI_KEY}",
-        f"https://api.usa.gov/crime/fbi/sapi/api/agencies?api_key={FBI_KEY}" # Backup check
-    ]
-    
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                # If it's the participation data, return the year
-                if 'data' in data and len(data['data']) > 0:
-                    return f"Active (Year: {data['data'][-1].get('year')})"
-                # If it's just the agency list, it still means we are CONNECTED
-                return "Connected (General)"
-            elif r.status_code == 403:
-                return "Invalid API Key"
-        except Exception as e:
-            continue
-            
-    return "Offline"
+    url = f"https://api.usa.gov/crime/fbi/sapi/api/participation/states/VA?api_key={FBI_KEY}"
+    try:
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return r.json().get('data', [])[-1] # Get latest year
+    except:
+        pass
+    return None
 
-# Update your sidebar code to show the specific status
-fbi_status = get_fbi_status()
-
-if "Active" in fbi_status or "Connected" in fbi_status:
-    st.sidebar.success(f"✅ FBI API: {fbi_status}")
-elif "Invalid" in fbi_status:
-    st.sidebar.error("❌ FBI API: Key Rejected (Check Secrets)")
-else:
-    st.sidebar.warning("⚠️ FBI API: No Response (Server Down)")
+# RUN LOADERS
+poi_df, census_df = load_data()
+fbi_intel = get_fbi_status() # This will now be either Data OR None
 
 # ================================
-# 3. SIDEBAR & LOGIC
+# 3. SIDEBAR & RISK LOGIC
 # ================================
 st.sidebar.title("🛡️ Intelligence Control")
 
-if fbi_intel:
-    st.sidebar.success(f"✅ FBI API Connected ({fbi_intel.get('year')})")
+# Safety Check: Use 'is not None' for the FBI check
+if fbi_intel is not None:
+    st.sidebar.success(f"✅ FBI API Connected ({fbi_intel.get('year', 'Active')})")
 else:
     st.sidebar.warning("❌ FBI API Offline")
 
@@ -111,19 +91,15 @@ if not poi_df.empty:
     selected_risks = st.sidebar.multiselect("Risk Levels", ['HIGH', 'MEDIUM', 'LOW'], default=['HIGH', 'MEDIUM', 'LOW'])
     
     final_df = poi_df[(poi_df['type'].isin(selected_types)) & (poi_df['level'].isin(selected_risks))]
-else:
-    final_df = pd.DataFrame()
 
 # ================================
 # 4. MAP DISPLAY
 # ================================
 st.title("🛡️ NOVA Strategic Intelligence")
-
 c1, c2 = st.columns([3, 1])
 
 with c1:
     m = folium.Map(location=[38.85, -77.30], zoom_start=11, tiles="cartodb dark_matter")
-    
     if not final_df.empty:
         for r in final_df.itertuples():
             folium.CircleMarker(
@@ -131,8 +107,7 @@ with c1:
                 fill=True, fill_color=r.color, fill_opacity=0.8,
                 popup=f"<b>{r.name}</b><br>Type: {r.type}"
             ).add_to(m)
-    
-    st_folium(m, width=900, height=500, key="nova_map_final")
+    st_folium(m, width=900, height=500, key="nova_map_v7")
 
 with c2:
     st.metric("Pins Tracked", len(final_df))
