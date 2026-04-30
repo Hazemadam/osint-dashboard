@@ -62,42 +62,44 @@ poi_df, census_df, serv_trend, sex_trend, loc_sex, loc_serv = load_all_intel()
 def run_threat_assessment(poi, census, s_trend, x_trend, lsx, lsv):
     if poi.empty or s_trend.empty: return pd.DataFrame(), pd.Series(), 1.0
     
-    # 1. Regional Multiplier
+    # 1. Regional Multiplier (The "Baseline")
     combined = s_trend.iloc[0, 1:].astype(float) + x_trend.iloc[0, 1:].astype(float)
-    multiplier = 1.25 if combined.tail(6).mean() > 5 else 1.0
+    # We'll use a slightly stronger multiplier to ensure 'High' is reachable
+    multiplier = 1.3 if combined.tail(6).mean() > 5 else 1.1
     
-    sex_map = dict(zip(lsx['key'], lsx['value']))
-    serv_map = dict(zip(lsv['key'], lsv['value']))
     county_risk = census.groupby('county')['vulnerability_score'].mean().to_dict()
     
     scores, colors, levels = [], [], []
     for _, row in poi.iterrows():
-        # 2. FBI Base Weight (Calibrated)
-        if any(x in str(row['type']).lower() for x in ['motel', 'hotel', 'spa', 'massage']):
-            base = 12  # Fixed base for high-risk types
-        elif any(x in str(row['type']).lower() for x in ['apartment', 'residential', 'home']):
-            base = 8   # Fixed base for mid-risk types
+        # 2. Assign Points by Venue Type
+        v_type = str(row['type']).lower()
+        if any(x in v_type for x in ['motel', 'hotel', 'spa', 'massage']):
+            base_points = 15  # High-risk category
+        elif any(x in v_type for x in ['apartment', 'residential', 'home', 'studio']):
+            base_points = 10  # Mid-risk category
         else:
-            base = 4   # Fixed base for others
+            base_points = 5   # Low-risk category
 
-        # 3. Normalized Vulnerability
+        # 3. Assign Points by Area Vulnerability (Census)
         c_name = str(row.get('county', 'fairfax')).lower().replace(' county', '').strip()
-        # Find the county vuln score or default to 0.5
-        vuln = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
+        vuln_score = next((v for k, v in county_risk.items() if c_name in str(k).lower()), 0.5)
+        # Scale vulnerability to a 10-point max
+        area_points = vuln_score * 10 
         
-        # 4. The Final Score Formula
-        # We use a 10-point scale for vulnerability to keep things predictable
-        fs = (base + (vuln * 10)) * multiplier
+        # 4. Calculate Final Score
+        # Max possible: (15 + 10) * 1.3 = 32.5
+        # Min possible: (5 + 1) * 1.1 = 6.6
+        fs = (base_points + area_points) * multiplier
         scores.append(fs)
         
-        # 5. NEW STRETCHED THRESHOLDS
-        # High is now 22+ (Requires High-type + High-vuln)
-        if fs >= 22: 
+        # 5. THE "THREE-TIER" CALIBRATION
+        # High: Requires High-risk venue AND decent vulnerability
+        if fs >= 26: 
             colors.append('red'); levels.append('HIGH')
-        # Medium is 15 to 22 (Captures Mid-types or High-types in safer areas)
-        elif 15 <= fs < 22: 
+        # Medium: The wide middle ground
+        elif 16 <= fs < 26: 
             colors.append('orange'); levels.append('MEDIUM')
-        # Low is anything below 15
+        # Low: Everything else
         else: 
             colors.append('blue'); levels.append('LOW')
             
