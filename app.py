@@ -28,29 +28,29 @@ FBI_KEY = st.secrets["FBI_KEY"]
 # ==========================================
 # 2. THE FBI HANDSHAKE (RE-ENGINEERED)
 # ==========================================
-@st.cache_data(ttl=60) # Short cache for testing
+@st.cache_data(ttl=3600)
 def get_fbi_status():
-    # Use the simplest possible endpoint to test connectivity
-    url = f"https://api.usa.gov/crime/fbi/sapi/api/participation/states/VA?api_key={FBI_KEY}"
+    # The updated, more stable endpoint for Virginia agencies
+    url = f"https://api.usa.gov/crime/fbi/sapi/api/agencies/byStateAbbreviation/VA?api_key={FBI_KEY}"
     
     try:
-        # Increase timeout to 15 seconds in case gov servers are slow
         r = requests.get(url, timeout=15)
         
         if r.status_code == 200:
-            data = r.json().get('data', [])
-            return f"Online (Year: {data[-1].get('year')})" if data else "Online (No Data)"
+            data = r.json()
+            # If we get a list of agencies back, the connection is successful!
+            if isinstance(data, list) and len(data) > 0:
+                return f"Online ({len(data)} VA Agencies Found)"
+            return "Online (Connected)"
+        
+        elif r.status_code == 404:
+            return "Error 404: Endpoint Moved (Check URL)"
         elif r.status_code == 403:
-            return "Error 403: Forbidden (Key Rejected)"
-        elif r.status_code == 429:
-            return "Error 429: Rate Limited (Too many tries)"
+            return "Error 403: Key Rejected"
         else:
             return f"Offline (Status: {r.status_code})"
     except Exception as e:
-        return f"Offline (Connection Error: {str(e)[:20]})"
-
-# Run the check
-fbi_status = get_fbi_status()
+        return f"Offline (Error: {str(e)[:15]})"
 
 # ==========================================
 # 3. SIDEBAR & DATA LOADING
