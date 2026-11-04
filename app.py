@@ -300,6 +300,9 @@ with tab_map:
                 tooltip=html.escape(r.name), popup=folium.Popup(popup, max_width=280),
             ).add_to(markers)
 
+        if not shown.empty:
+            m.fit_bounds([[shown["lat"].min(), shown["lng"].min()],
+                          [shown["lat"].max(), shown["lng"].max()]], padding=(20, 20))
         folium.LayerControl(collapsed=True).add_to(m)
         st_folium(m, height=560, use_container_width=True, returned_objects=[], key="nova_map")
         if len(final_df) > MAX_MARKERS:
