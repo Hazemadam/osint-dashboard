@@ -1,0 +1,6 @@
+# Extra packages for update_data.py (GitHub Action only; the app doesn't need these)
+pandas>=2.0
+pyarrow>=14
+requests>=2.31
+geopandas>=1.0
+pyogrio>=0.9
