@@ -264,7 +264,7 @@ with tab_map:
         m = folium.Map(location=[38.85, -77.30], zoom_start=10, tiles=None, prefer_canvas=True)
         folium.TileLayer(esri.format("World_Dark_Gray_Base"), attr=esri_attr, name="Dark",
                          max_zoom=16).add_to(m)
-        folium.TileLayer("OpenStreetMap", name="Streets").add_to(m)
+        folium.TileLayer("OpenStreetMap", name="Streets", show=False).add_to(m)
         folium.TileLayer(esri.format("World_Dark_Gray_Reference"), attr=esri_attr, name="Labels",
                          overlay=True, control=True, max_zoom=16).add_to(m)
 
