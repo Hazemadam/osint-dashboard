@@ -171,8 +171,9 @@ def fetch_osm_data() -> pd.DataFrame:
                 "name": tags["name"].strip(),
                 "lat": lat,
                 "lng": lng,
+                # Prefer the tag the query matched on; a restaurant may also carry shop=bakery.
                 "type": tags.get("tourism")
-                or tags.get("shop")
+                or ("massage" if tags.get("shop") == "massage" else None)
                 or tags.get("amenity")
                 or tags.get("leisure"),
                 "address": " ".join(
