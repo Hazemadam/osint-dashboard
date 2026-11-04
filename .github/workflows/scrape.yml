@@ -40,4 +40,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add nova_data.parquet vulnerability_data.parquet tracts.geojson
           git commit -m "Auto-update: venue & vulnerability data" || exit 0
+          git pull --rebase origin main
           git push
