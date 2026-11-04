@@ -258,8 +258,15 @@ with tab_map:
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        m = folium.Map(location=[38.85, -77.30], zoom_start=10, tiles="cartodb dark_matter",
-                       prefer_canvas=True)
+        # CARTO's free basemaps now require an API key, so use keyless tile sources.
+        esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+        esri_attr = "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors"
+        m = folium.Map(location=[38.85, -77.30], zoom_start=10, tiles=None, prefer_canvas=True)
+        folium.TileLayer(esri.format("World_Dark_Gray_Base"), attr=esri_attr, name="Dark",
+                         max_zoom=16).add_to(m)
+        folium.TileLayer("OpenStreetMap", name="Streets").add_to(m)
+        folium.TileLayer(esri.format("World_Dark_Gray_Reference"), attr=esri_attr, name="Labels",
+                         overlay=True, control=True, max_zoom=16).add_to(m)
 
         if show_area and tracts_geo is not None:
             steps = ["#1a1f36", "#2c3a73", "#4b4fa8", "#7a52c7", "#b04fc4"]
@@ -278,6 +285,7 @@ with tab_map:
 
         MAX_MARKERS = 2000
         shown = final_df.head(MAX_MARKERS)
+        markers = folium.FeatureGroup(name="Locations").add_to(m)
         for r in shown.itertuples():
             popup = (
                 f"<b>{html.escape(r.name)}</b><br>{html.escape(r.type.replace('_', ' '))}"
@@ -290,8 +298,9 @@ with tab_map:
                 location=[r.lat, r.lng], radius=7, color="white", weight=0.6,
                 fill=True, fill_color=r.color, fill_opacity=0.85,
                 tooltip=html.escape(r.name), popup=folium.Popup(popup, max_width=280),
-            ).add_to(m)
+            ).add_to(markers)
 
+        folium.LayerControl(collapsed=True).add_to(m)
         st_folium(m, height=560, use_container_width=True, returned_objects=[], key="nova_map")
         if len(final_df) > MAX_MARKERS:
             st.caption(f"Showing the {MAX_MARKERS:,} highest-scoring of {len(final_df):,} locations. "
