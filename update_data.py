@@ -11,6 +11,7 @@ environment (GitHub Secrets); the Census API also works without a key at low vol
 """
 import os
 import sys
+import time
 
 import geopandas as gpd
 import pandas as pd
@@ -57,7 +58,12 @@ OVERPASS_QUERY = f"""
 );
 out center;
 """
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Public Overpass servers are often overloaded; try each with retries.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 USER_AGENT = "nova-osint-dashboard (github.com/Hazemadam/osint-dashboard)"
 
 
@@ -130,15 +136,31 @@ def fetch_tract_shapes() -> gpd.GeoDataFrame:
 
 def fetch_osm_data() -> pd.DataFrame:
     print("Fetching OpenStreetMap venues...")
-    r = requests.post(
-        OVERPASS_URL,
-        data={"data": OVERPASS_QUERY},
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        timeout=180,
-    )
-    r.raise_for_status()
+    elements, last_error = None, None
+    for attempt in range(3):
+        for url in OVERPASS_URLS:
+            try:
+                r = requests.post(
+                    url,
+                    data={"data": OVERPASS_QUERY},
+                    headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                    timeout=180,
+                )
+                r.raise_for_status()
+                elements = r.json().get("elements", [])
+                print(f"  got {len(elements)} elements from {url}")
+                break
+            except (requests.RequestException, ValueError) as e:
+                last_error = e
+                print(f"  {url} failed: {e}")
+        if elements is not None:
+            break
+        time.sleep(30 * (attempt + 1))
+    if elements is None:
+        raise RuntimeError(f"All Overpass servers failed: {last_error}")
+
     rows = []
-    for el in r.json().get("elements", []):
+    for el in elements:
         tags = el.get("tags", {})
         lat = el.get("lat") or el.get("center", {}).get("lat")
         lng = el.get("lon") or el.get("center", {}).get("lon")
