@@ -30,7 +30,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The optional review keyword check needs a SerpAPI key in `.streamlit/secrets.toml`:
+The optional business deep dive (Google listing, hours and review analysis) needs a SerpAPI key in `.streamlit/secrets.toml`:
 
 ```toml
 SERP_KEY = "..."

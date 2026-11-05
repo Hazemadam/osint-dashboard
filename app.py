@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
+import deep_dive as dd
+
 st.set_page_config(page_title="NOVA Risk Profile Explorer", page_icon="🛡️", layout="wide")
 
 DATA_DIR = Path(__file__).parent
@@ -44,8 +46,6 @@ TIERS = [  # (min score, label, map colour, icon)
     (5.0, "Moderate match", "#f5a524", "🟠"),
     (0.0, "Weak match", "#3e8ed0", "🔵"),
 ]
-
-REVIEW_FLAGS = ["buzzer", "locked", "cash only", "scared", "after hours", "back door"]
 
 
 # ==========================================
@@ -137,7 +137,7 @@ def score_locations(poi: pd.DataFrame, servitude: pd.Series, sex_acts: pd.Series
 
 
 # ==========================================
-# 3. REVIEW KEYWORD CHECK (SerpAPI)
+# 3. BUSINESS DEEP DIVE (SerpAPI)
 # ==========================================
 def _serp_key():
     try:
@@ -147,41 +147,8 @@ def _serp_key():
 
 
 @st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
-def review_keyword_check(name: str, lat: float, lng: float):
-    """Find the place on Google Maps near its coordinates and scan its recent reviews."""
-    from serpapi import GoogleSearch
-
-    key = _serp_key()
-    res = GoogleSearch(
-        {"engine": "google_maps", "type": "search", "q": name,
-         "ll": f"@{lat},{lng},17z", "api_key": key}
-    ).get_dict()
-    if "error" in res and "place_results" not in res and "local_results" not in res:
-        return {"error": res["error"]}
-
-    place = res.get("place_results") or (res.get("local_results") or [None])[0]
-    if not place or not place.get("data_id"):
-        return {"error": "No matching Google Maps listing found."}
-
-    reviews = GoogleSearch(
-        {"engine": "google_maps_reviews", "data_id": place["data_id"], "api_key": key}
-    ).get_dict().get("reviews", [])
-
-    pattern = re.compile(r"\b(" + "|".join(map(re.escape, REVIEW_FLAGS)) + r")\b", re.I)
-    hits = []
-    for r in reviews:
-        text = r.get("snippet") or ""
-        found = sorted({m.lower() for m in pattern.findall(text)})
-        if found:
-            hits.append({"keywords": found, "text": text, "date": r.get("date", "")})
-
-    return {
-        "matched_title": place.get("title", ""),
-        "matched_address": place.get("address", ""),
-        "rating": place.get("rating"),
-        "reviews_checked": len(reviews),
-        "hits": hits,
-    }
+def business_deep_dive(name: str, lat: float, lng: float, pages: int):
+    return dd.fetch_business(name, lat, lng, pages, _serp_key())
 
 
 # ==========================================
@@ -252,7 +219,9 @@ if not has_area:
         "1.5 area points. It fills in after the data workflow next runs."
     )
 
-tab_map, tab_table, tab_trends, tab_method = st.tabs(["Map", "Table", "FBI trends", "How scoring works"])
+tab_map, tab_dive, tab_table, tab_trends, tab_method = st.tabs(
+    ["Map", "Business deep dive", "Table", "FBI trends", "How scoring works"]
+)
 
 with tab_map:
     col1, col2 = st.columns([3, 1])
@@ -323,53 +292,158 @@ with tab_map:
                 st.caption(f"{row['score']} / 10 · {row['type'].replace('_', ' ')}"
                            f"{' · ' + row['county_name'] if row['county_name'] else ''}")
 
-    # --- Review keyword check ---
-    st.markdown("---")
-    st.subheader("🔎 Review keyword check")
+with tab_dive:
+    st.subheader("🔎 Business deep dive")
+    st.caption(
+        "Pulls together everything public about one business: its profile score, the area it's in, "
+        "nearby profile matches, its Google Maps listing and hours, and an analysis of its recent "
+        "reviews. Business-level information only; it doesn't look up owners, staff or reviewers."
+    )
     if final_df.empty:
-        st.caption("No locations match the current filters.")
-    elif not _serp_key():
-        st.caption("Add `SERP_KEY` to the app's Streamlit secrets to enable review checks.")
+        st.info("No locations match the current filters. Lower the minimum score in the sidebar.")
     else:
-        c1, c2 = st.columns([3, 1])
-        target = c1.selectbox("Location", final_df.index, format_func=_label, label_visibility="collapsed")
-        run = c2.button("Check recent reviews", width="stretch")
+        target = st.selectbox("Business", final_df.index, format_func=_label,
+                              help="Type to search. The list follows the sidebar filters.")
         row = final_df.loc[target]
-        if run:
-            with st.spinner("Checking Google Maps reviews…"):
-                try:
-                    st.session_state.setdefault("scans", {})[target] = review_keyword_check(
-                        row["name"], float(row["lat"]), float(row["lng"])
-                    )
-                except Exception as e:
-                    st.session_state.setdefault("scans", {})[target] = {"error": str(e)}
 
-        result = st.session_state.get("scans", {}).get(target)
-        if result:
-            if "error" in result:
-                st.warning(f"Review check failed: {result['error']}")
+        # --- Profile + area (free, from local data) ---
+        a, b, c = st.columns(3)
+        a.metric("Profile score", f"{row['score']} / 10", row["tier"], delta_color="off")
+        b.metric("Venue type", row["type"].replace("_", " ").title(), f"{row['venue_pts']:g} of 6 pts",
+                 delta_color="off")
+        c.metric("Area vulnerability", f"{row['area_pts']:g} of 3 pts",
+                 row["county_name"] or None, delta_color="off")
+
+        tract = None
+        if "geoid" in row and not census_df.empty and "geoid" in census_df:
+            m_ = census_df[census_df["geoid"] == row["geoid"]]
+            tract = m_.iloc[0] if not m_.empty else None
+        if tract is not None:
+            nova_inc = census_df["median_income"].median()
+            nova_pov = census_df["poverty_rate"].median()
+            inc = tract["median_income"]
+            st.caption(
+                f"**Census tract** {tract['NAME'].split(';')[0].split(',')[0]} · "
+                f"median household income {'n/a' if pd.isna(inc) else f'${inc:,.0f}'} "
+                f"(NoVA tract median ${nova_inc:,.0f}) · poverty rate "
+                f"{'n/a' if pd.isna(tract['poverty_rate']) else f'{tract.poverty_rate:.0%}'} "
+                f"(NoVA {nova_pov:.0%}) · renters without a car "
+                f"{'n/a' if pd.isna(tract['no_vehicle_renter_share']) else f'{tract.no_vehicle_renter_share:.0%}'}"
+            )
+
+        dist = dd.haversine_m(row["lat"], row["lng"], scored["lat"].values, scored["lng"].values)
+        near = scored.assign(distance_m=dist)
+        near = near[(near["distance_m"] <= 1000) & (near.index != target) & (near["score"] >= 5)]
+        near = near.sort_values("distance_m")
+        nearby = near[["name", "type", "distance_m", "score"]].head(15).to_dict("records")
+        with st.expander(f"Nearby profile matches within 1 km: {len(near)}", expanded=False):
+            if near.empty:
+                st.caption("None.")
             else:
-                rating = f" · ★ {result['rating']}" if result.get("rating") else ""
-                st.caption(
-                    f"Matched Google listing: **{result['matched_title']}** {result['matched_address']}{rating} · "
-                    f"{result['reviews_checked']} most recent reviews checked. "
-                    "Confirm this is the right business before reading anything into it."
+                st.dataframe(
+                    near[["name", "type", "distance_m", "score"]].head(15).rename(columns={"distance_m": "metres"}),
+                    hide_index=True, width="stretch",
+                    column_config={"metres": st.column_config.NumberColumn(format="%.0f")},
                 )
-                if not result["hits"]:
-                    st.success("None of the watch keywords appeared in the reviews checked.")
+                st.caption("Several matches close together can point to a corridor worth looking at as a whole.")
+
+        # --- Google listing + reviews (SerpAPI) ---
+        st.markdown("#### Google Maps listing & reviews")
+        result = None
+        if not _serp_key():
+            st.caption("Add `SERP_KEY` to the app's Streamlit secrets to enable listing and review analysis.")
+        else:
+            c1, c2 = st.columns([3, 1])
+            depth = c1.selectbox("Review depth", list(dd.REVIEW_DEPTHS), index=1,
+                                 help="More reviews give a better picture but use more SerpAPI searches. "
+                                      "Results are saved for a week, so re-running is free.")
+            pages = dd.REVIEW_DEPTHS[depth]
+            c2.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+            run = c2.button("Run deep dive", type="primary", width="stretch")
+            key = (target, pages)
+            if run:
+                with st.spinner("Looking up the listing and reading reviews…"):
+                    try:
+                        st.session_state.setdefault("dives", {})[key] = business_deep_dive(
+                            row["name"], float(row["lat"]), float(row["lng"]), pages)
+                    except Exception as e:
+                        st.session_state.setdefault("dives", {})[key] = {"error": str(e)}
+            result = st.session_state.get("dives", {}).get(key)
+
+        if result and "error" in result:
+            st.warning(f"Deep dive failed: {result['error']}")
+        elif result:
+            L, H, R = result["listing"], result["hours"], result["reviews"]
+            far = L["distance_m"] is not None and L["distance_m"] > 250
+            msg = (f"Matched **{L['title']}**, {L['address']}"
+                   + (f" ({L['distance_m']:.0f} m from the mapped location)" if L["distance_m"] is not None else ""))
+            (st.warning if far else st.caption)(
+                msg + (". That's far enough that it may be a different business; check before relying on it."
+                       if far else ". Confirm this is the right business before reading anything into it."))
+
+            l1, l2, l3, l4 = st.columns(4)
+            l1.metric("Google rating", f"★ {L['rating']}" if L["rating"] else "n/a",
+                      f"{L['review_total']:,} reviews" if L["review_total"] else None, delta_color="off")
+            l2.metric("Category", L["category"] or "n/a")
+            l3.metric("Status", L["open_state"].split("⋅")[0].strip() if L["open_state"] else "n/a")
+            l4.metric("Price", L["price"] or "n/a")
+            st.caption(f"Website: {L['website'] or 'none listed'} · Phone: {L['phone'] or 'none listed'}")
+
+            st.markdown("##### Signals")
+            st.caption("Each is common at ordinary businesses. Look at them together and in context.")
+            sig_rows = [{"Signal": n, "Present": "Yes" if p else ("Unknown" if p is None else "No"), "Detail": d}
+                        for n, p, d in dd.signals(result)]
+            st.dataframe(pd.DataFrame(sig_rows), hide_index=True, width="stretch")
+
+            h1, h2 = st.columns(2)
+            with h1:
+                st.markdown("##### Hours")
+                if H["known"]:
+                    st.dataframe(pd.DataFrame(
+                        [{"Day": d.title(), "Hours": h, "Late": "🌙" if d in H["late_days"] else ""}
+                         for d, h in H["days"].items()]), hide_index=True, width="stretch")
                 else:
-                    st.warning(
-                        f"Watch keywords appeared in {len(result['hits'])} review(s). These phrases are "
-                        "common in ordinary reviews too (\"cash only\", \"after hours\"), so read them in context."
+                    st.caption("No hours on the listing.")
+            with h2:
+                st.markdown("##### Ratings in the reviews read")
+                if R["count"]:
+                    st.bar_chart(pd.Series(R["ratings"], name="reviews").rename(lambda s: f"{s}★"))
+                    st.caption(f"{R['count']} reviews from {R['oldest']} to {R['newest']}.")
+                else:
+                    st.caption("No reviews returned.")
+
+            if len(R["months"]) > 1:
+                st.markdown("##### Review activity by month")
+                st.bar_chart(pd.Series(R["months"], name="reviews"))
+                st.caption("Bursts of reviews, or a sudden stop, can be worth a closer look.")
+
+            st.markdown(f"##### Reviews with indicator language: {len(R['hits'])} of {R['count']}")
+            if not R["hits"]:
+                st.success("None of the indicator phrases appeared in the reviews read.")
+            else:
+                st.caption("Phrases are highlighted. Many have innocent meanings, so read the whole review.")
+                themes = sorted({t for h in R["hits"] for t in h["themes"]})
+                pick = st.multiselect("Themes", themes, default=themes, label_visibility="collapsed")
+                for h in R["hits"]:
+                    if not set(h["themes"]) & set(pick):
+                        continue
+                    phrases = [p for ps in h["themes"].values() for p in ps]
+                    tags = " · ".join(h["themes"])
+                    stars = f"{h['rating']:g}★" if isinstance(h["rating"], (int, float)) else ""
+                    st.markdown(
+                        f"> {dd.highlight(h['text'], phrases)}  \n"
+                        f"<small>{html.escape(h['date'])} · {stars} · {html.escape(tags)}</small>",
+                        unsafe_allow_html=True,
                     )
-                    for h in result["hits"]:
-                        text = html.escape(h["text"])
-                        for k in h["keywords"]:
-                            text = re.sub(rf"\b({re.escape(k)})\b", r"<mark>\1</mark>", text, flags=re.I)
-                        st.markdown(
-                            f"> {text}  \n<small>{html.escape(h['date'])} · {', '.join(h['keywords'])}</small>",
-                            unsafe_allow_html=True,
-                        )
+            st.caption(f"Fetched {result['fetched_at']} · {result['searches_used']} SerpAPI searches.")
+
+        st.download_button(
+            "Download profile (Markdown)",
+            dd.report_markdown(row.to_dict(), result, nearby, DISCLAIMER).encode(),
+            file_name=f"profile_{re.sub(r'[^A-Za-z0-9]+', '_', row['name']).strip('_')[:40]}.md",
+            mime="text/markdown",
+        )
+        st.caption(DISCLAIMER)
 
 with tab_table:
     cols = ["name", "type", "county_name", "address", "score", "tier", "venue_pts", "area_pts", "trend_pts", "lat", "lng"]
@@ -417,7 +491,8 @@ Score tiers: **8+** strong match · **5–8** moderate · **below 5** weak.
 - Venue type carries most of the score, so nearly every hotel and massage business scores highly. The score says nothing about how any individual business operates.
 - Area indicators describe neighborhoods, not businesses.
 - The FBI trend is statewide and identical for every location.
-- The review check only reads a handful of recent public reviews and looks for keywords that also appear in ordinary reviews.
+- The business deep dive reads at most the ~50 newest public Google reviews. Its indicator phrases (grouped by theme, drawn from published anti-trafficking research) also appear in ordinary reviews, and their absence doesn't clear a business.
+- The deep dive is business-level only: it doesn't look up owners, staff or reviewers.
 - Locations come from OpenStreetMap and can be missing, closed or mislabeled.
 
 {DISCLAIMER}
